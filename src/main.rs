@@ -19,10 +19,16 @@ usage: rgg [PATH] [-t TYPE]... [--regex]
   PATH          folder to search (default: current directory)
   -t, --type    only search files of this ripgrep type (repeatable), e.g. -t cs
   -r, --regex   start in regex mode
+  -V, --version show version and git commit
   -h, --help    show this help
 
 Press F1 inside the app for key bindings.
 Config: ~/.rgg/config.toml (%USERPROFILE%\\.rgg\\config.toml)";
+
+/// e.g. `rgg 0.1.0 (0f2f72b)`; `-dirty` marks a build with uncommitted changes.
+fn version() -> String {
+    format!("rgg {} ({})", env!("CARGO_PKG_VERSION"), env!("RGG_GIT_COMMIT"))
+}
 
 struct Args {
     path: PathBuf,
@@ -38,6 +44,10 @@ fn parse_args() -> Result<Args, String> {
         match a.as_str() {
             "-h" | "--help" => {
                 println!("{USAGE}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("{}", version());
                 std::process::exit(0);
             }
             "-r" | "--regex" => args.regex = true,
