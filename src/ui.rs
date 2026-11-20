@@ -1,6 +1,6 @@
 //! Rendering.
 
-use crate::app::{App, Areas, FOLDER_SETTINGS, Popup, SETTINGS, Status, VALUE_SETTINGS};
+use crate::app::{App, Areas, FOLDER_SETTINGS, Popup, RowRef, SETTINGS, Status, VALUE_SETTINGS};
 use crate::config::{Case, ListMode, Mode};
 use crate::preview::{compose, current_style, match_style, sanitize, wrap_line};
 use crate::search::MAX_PER_FILE;
@@ -146,15 +146,31 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     } else if sel >= app.list_offset + h {
         app.list_offset = sel + 1 - h;
     }
+    // Keep a group's header visible when its first item is selected at the top.
+    if sel == app.list_offset && sel > 0 && matches!(app.row_ref(sel - 1), RowRef::Header(_)) {
+        app.list_offset = sel - 1;
+    }
     app.list_offset = app.list_offset.min(count.saturating_sub(h));
 
     let mut lines = Vec::with_capacity(h);
     for row in app.list_offset..(app.list_offset + h).min(count) {
-        let (fi, mi) = app.row_to_sel(row);
+        let (fi, mi) = match app.row_ref(row) {
+            RowRef::Item(fi, mi) => (fi, mi),
+            RowRef::Header(fi) => {
+                let Some(file) = app.files.get(fi) else { break };
+                let label = format!("─ {} ", shorten_left(&app.repo_label(&file.repo), w.saturating_sub(4)));
+                let fill = "─".repeat(w.saturating_sub(label.chars().count()));
+                lines.push(Line::from(Span::styled(
+                    format!("{label}{fill}"),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )));
+                continue;
+            }
+        };
         let Some(file) = app.files.get(fi) else { break };
         let selected = row == sel;
         let prefix = if selected { "▶ " } else { "  " };
-        let path = file.rel.to_string_lossy();
+        let path = app.display_path(file);
         let base = if selected {
             Style::default().bg(SEL_BG).add_modifier(Modifier::BOLD)
         } else {
@@ -445,6 +461,35 @@ mod tests {
     use crate::config::{Config, ListMode, Store};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn renders_repository_groups() {
+        let dir = crate::search::temp_dir("ui-groups");
+        for repo in ["api", "web"] {
+            std::fs::create_dir_all(dir.join(repo).join(".git")).unwrap();
+            std::fs::create_dir_all(dir.join(repo).join("src").join("deep")).unwrap();
+            std::fs::write(dir.join(repo).join("src").join("deep").join("x.cs"), "foo\n").unwrap();
+        }
+        let store = Store { path: None, writable: true };
+        let mut app = App::new(Config::default(), store, dir.clone(), dir.clone(), vec![], false);
+        app.query = "foo".into();
+        app.cursor = 3;
+        app.start_search();
+        let start = std::time::Instant::now();
+        while app.is_busy() && start.elapsed().as_secs() < 5 {
+            app.tick();
+        }
+        let s = screen(&mut app);
+        println!("{s}");
+        assert!(s.contains("─ api ─"));
+        assert!(s.contains("─ web ─"));
+        let deep = std::path::Path::new("src").join("deep").join("x.cs");
+        let deep = deep.to_string_lossy();
+        assert!(s.contains(&format!("  {deep}")), "paths are relative to the repository");
+        assert!(!s.contains(&format!("▶ api{}", std::path::MAIN_SEPARATOR)), "no repo prefix in rows");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn screen(app: &mut App) -> String {
         let mut t = Terminal::new(TestBackend::new(110, 20)).unwrap();
@@ -472,6 +517,8 @@ mod tests {
         while app.is_busy() && start.elapsed().as_secs() < 5 {
             app.tick();
         }
+        // Selection follows the first file to arrive; pick the top row explicitly.
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
         let s = screen(&mut app);
         println!("{s}");
         assert!(s.contains("2 files · 3 matches"), "status line");
@@ -480,7 +527,8 @@ mod tests {
         assert!(s.contains("match 1/1"), "preview title for first file (notes.md)");
         assert!(s.contains("foo bar"), "preview content");
 
-        app.cfg.list_mode = ListMode::Match;
+        app.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
+        assert_eq!(app.cfg.list_mode, ListMode::Match);
         let s = screen(&mut app);
         println!("{s}");
         assert!(s.contains("main.cs:5"));

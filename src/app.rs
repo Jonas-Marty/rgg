@@ -43,12 +43,32 @@ pub struct SettingsState {
     pub editing: Option<String>,
 }
 
+/// Indices of the entries in `SETTINGS`.
+pub mod item {
+    pub const MODE: usize = 0;
+    pub const CASE: usize = 1;
+    pub const HIDDEN: usize = 2;
+    pub const IGNORED: usize = 3;
+    pub const LIST: usize = 4;
+    pub const GROUP: usize = 5;
+    pub const WRAP: usize = 6;
+    pub const AFTER_OPEN: usize = 7;
+    pub const MAX_SIZE: usize = 8;
+    pub const MAX_FILES: usize = 9;
+    pub const MIN_QUERY: usize = 10;
+    pub const THEME: usize = 11;
+    pub const EDITOR: usize = 12;
+    pub const RESET: usize = 13;
+    pub const CONFIG: usize = 14;
+}
+
 pub const SETTINGS: &[&str] = &[
     "Search mode",
     "Case",
     "Include hidden",
     "Include ignored",
     "List mode",
+    "Group by repository",
     "Wrap preview",
     "After opening",
     "Max file size (MB)",
@@ -60,9 +80,10 @@ pub const SETTINGS: &[&str] = &[
     "Config file",
 ];
 /// Settings that are stored per folder.
-pub const FOLDER_SETTINGS: &[usize] = &[0, 2, 3];
+pub const FOLDER_SETTINGS: &[usize] = &[item::MODE, item::HIDDEN, item::IGNORED];
 /// Settings shown as plain values instead of ‹ choices ›.
-pub const VALUE_SETTINGS: &[usize] = &[7, 8, 9, 11, 12, 13];
+pub const VALUE_SETTINGS: &[usize] =
+    &[item::MAX_SIZE, item::MAX_FILES, item::MIN_QUERY, item::EDITOR, item::RESET, item::CONFIG];
 
 pub enum Popup {
     None,
@@ -77,6 +98,15 @@ pub struct Areas {
     pub preview: Rect,
 }
 
+/// A row of the result list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowRef {
+    /// Repository header above file `.0`.
+    Header(usize),
+    /// File index and occurrence index.
+    Item(usize, usize),
+}
+
 /// Identity of an occurrence that survives re-sorting and re-searching.
 type OccKey = (PathBuf, u64, usize);
 
@@ -86,7 +116,6 @@ pub struct App {
     /// Config differs from what is on disk.
     cfg_dirty: bool,
     pub search_root: PathBuf,
-    pub git_root: PathBuf,
     folder_key: String,
     /// Effective per-folder settings (saved values plus run-only CLI overrides).
     pub folder: FolderSettings,
@@ -102,6 +131,7 @@ pub struct App {
     pub files: Vec<FileResult>,
     offsets: Vec<usize>,
     offsets_dirty: bool,
+    grouped: bool,
     pub total_matches: usize,
     pub truncated_files: usize,
     pub sel_file: usize,
@@ -162,7 +192,6 @@ impl App {
             store,
             cfg_dirty: false,
             search_root,
-            git_root,
             folder_key,
             folder,
             saved_folder,
@@ -172,6 +201,7 @@ impl App {
             files: Vec::new(),
             offsets: vec![0],
             offsets_dirty: false,
+            grouped: false,
             total_matches: 0,
             truncated_files: 0,
             sel_file: 0,
@@ -286,8 +316,7 @@ impl App {
 
     fn clear_results(&mut self) {
         self.files.clear();
-        self.offsets = vec![0];
-        self.offsets_dirty = false;
+        self.offsets_dirty = true;
         self.total_matches = 0;
         self.truncated_files = 0;
         self.sel_file = 0;
@@ -296,7 +325,11 @@ impl App {
     }
 
     fn insert_file(&mut self, file: FileResult) {
-        let pos = self.files.binary_search_by(|f| f.rel.cmp(&file.rel)).unwrap_or_else(|e| e);
+        // Sorted by repository first so nested repositories stay contiguous groups.
+        let pos = self
+            .files
+            .binary_search_by(|f| (&f.repo, &f.rel).cmp(&(&file.repo, &file.rel)))
+            .unwrap_or_else(|e| e);
         self.total_matches += file.matches.len();
         self.truncated_files += file.truncated as usize;
         let sticky_hit = match &self.sticky {
@@ -324,57 +357,89 @@ impl App {
 
     // ------------------------------------------------------------- selection
 
-    fn ensure_offsets(&mut self) {
-        if self.offsets_dirty {
-            self.offsets.clear();
-            self.offsets.push(0);
-            let mut acc = 0;
-            for f in &self.files {
-                acc += f.matches.len();
-                self.offsets.push(acc);
-            }
-            self.offsets_dirty = false;
+    fn rows_of(&self, f: &FileResult) -> usize {
+        match self.cfg.list_mode {
+            ListMode::File => 1,
+            ListMode::Match => f.matches.len(),
         }
+    }
+
+    /// Recomputes row positions: `offsets[i]` is the first row of file `i`'s items, the last
+    /// entry is the total row count. A header row precedes each repository group when grouped.
+    fn ensure_offsets(&mut self) {
+        if !self.offsets_dirty {
+            return;
+        }
+        let multi = self.files.windows(2).any(|w| w[0].repo != w[1].repo);
+        self.grouped = self.cfg.group_by_repo && multi;
+        let mut offsets = Vec::with_capacity(self.files.len() + 1);
+        let mut acc = 0;
+        for (i, f) in self.files.iter().enumerate() {
+            if self.grouped && (i == 0 || self.files[i - 1].repo != f.repo) {
+                acc += 1;
+            }
+            offsets.push(acc);
+            acc += self.rows_of(f);
+        }
+        offsets.push(acc);
+        self.offsets = offsets;
+        self.offsets_dirty = false;
+    }
+
+    /// True when the list shows repository headers (results span several repositories).
+    #[cfg(test)]
+    pub fn is_grouped(&mut self) -> bool {
+        self.ensure_offsets();
+        self.grouped
     }
 
     pub fn row_count(&mut self) -> usize {
-        match self.cfg.list_mode {
-            ListMode::File => self.files.len(),
-            ListMode::Match => {
-                self.ensure_offsets();
-                *self.offsets.last().unwrap_or(&0)
-            }
-        }
+        self.ensure_offsets();
+        *self.offsets.last().unwrap_or(&0)
     }
 
     pub fn sel_row(&mut self) -> usize {
+        self.ensure_offsets();
+        let base = self.offsets.get(self.sel_file).copied().unwrap_or(0);
         match self.cfg.list_mode {
-            ListMode::File => self.sel_file,
-            ListMode::Match => {
-                self.ensure_offsets();
-                self.offsets.get(self.sel_file).copied().unwrap_or(0) + self.sel_match
-            }
+            ListMode::File => base,
+            ListMode::Match => base + self.sel_match,
         }
     }
 
-    /// Maps a list row to (file index, match index).
-    pub fn row_to_sel(&mut self, row: usize) -> (usize, usize) {
-        match self.cfg.list_mode {
-            ListMode::File => (row, 0),
-            ListMode::Match => {
-                self.ensure_offsets();
-                let f = self.offsets.partition_point(|&o| o <= row).saturating_sub(1);
-                (f, row - self.offsets[f])
-            }
+    /// What is shown on a list row.
+    pub fn row_ref(&mut self, row: usize) -> RowRef {
+        self.ensure_offsets();
+        let n = self.files.len();
+        let f = self.offsets[..n].partition_point(|&o| o <= row);
+        if f == 0 {
+            return RowRef::Header(0);
+        }
+        let f = f - 1;
+        let within = row - self.offsets[f];
+        if within < self.rows_of(&self.files[f]) {
+            RowRef::Item(f, if self.cfg.list_mode == ListMode::Match { within } else { 0 })
+        } else {
+            RowRef::Header(f + 1)
         }
     }
 
-    fn set_row(&mut self, row: usize) {
+    /// Selects the item on `row`. A header row selects the item below it, or with
+    /// `upward` the item above it (headers are never selected).
+    fn set_row(&mut self, row: usize, upward: bool) {
         let count = self.row_count();
         if count == 0 {
             return;
         }
-        let (f, m) = self.row_to_sel(row.min(count - 1));
+        let row = row.min(count - 1);
+        let (f, m) = match self.row_ref(row) {
+            RowRef::Item(f, m) => (f, m),
+            RowRef::Header(f) if upward && row > 0 => match self.row_ref(row - 1) {
+                RowRef::Item(f, m) => (f, m),
+                RowRef::Header(_) => (f, 0),
+            },
+            RowRef::Header(f) => (f.min(self.files.len() - 1), 0),
+        };
         self.sel_file = f;
         self.sel_match = m;
         self.sticky = None; // the user's choice wins over the previous search's selection
@@ -382,7 +447,30 @@ impl App {
 
     fn move_rows(&mut self, delta: isize) {
         let row = self.sel_row() as isize + delta;
-        self.set_row(row.max(0) as usize);
+        self.set_row(row.max(0) as usize, delta < 0);
+    }
+
+    /// Path shown in the list: relative to its repository when grouped and the repository
+    /// lies below the search root, otherwise relative to the search root.
+    pub fn display_path(&self, f: &FileResult) -> String {
+        if self.grouped
+            && *f.repo != *self.search_root
+            && f.repo.starts_with(&self.search_root)
+            && let Ok(p) = self.search_root.join(&f.rel).strip_prefix(&f.repo)
+        {
+            return p.to_string_lossy().into_owned();
+        }
+        f.rel.to_string_lossy().into_owned()
+    }
+
+    /// Header text for a repository group.
+    pub fn repo_label(&self, repo: &std::path::Path) -> String {
+        match repo.strip_prefix(&self.search_root) {
+            Ok(p) if !p.as_os_str().is_empty() => p.to_string_lossy().into_owned(),
+            _ => repo
+                .file_name()
+                .map_or_else(|| repo.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()),
+        }
     }
 
     fn step_match(&mut self, delta: isize) {
@@ -565,8 +653,8 @@ impl App {
             KeyCode::Down => self.move_rows(1),
             KeyCode::PageUp => self.move_rows(-page),
             KeyCode::PageDown => self.move_rows(page),
-            KeyCode::Home => self.set_row(0),
-            KeyCode::End => self.set_row(usize::MAX),
+            KeyCode::Home => self.set_row(0, false),
+            KeyCode::End => self.set_row(usize::MAX, false),
             KeyCode::Enter => self.open_editor(),
             KeyCode::F(1) => self.popup = Popup::Help,
             _ => {}
@@ -599,6 +687,7 @@ impl App {
             ListMode::File => ListMode::Match,
             ListMode::Match => ListMode::File,
         };
+        self.offsets_dirty = true;
         self.cfg_dirty = true;
         self.save_config();
     }
@@ -609,15 +698,16 @@ impl App {
         self.synced = None; // re-centre with the new layout
     }
 
-    /// The command the editor would be started with for the selected occurrence.
-    pub fn editor_target(&self) -> Option<(PathBuf, u64, usize)> {
+    /// What the editor is opened with for the selected occurrence:
+    /// (folder = the file's repository, file, line, UTF-16 column).
+    pub fn editor_target(&self) -> Option<(PathBuf, PathBuf, u64, usize)> {
         let (file, m) = self.selected()?;
-        Some((self.search_root.join(&file.rel), m.line, m.col))
+        Some((file.repo.to_path_buf(), self.search_root.join(&file.rel), m.line, m.col))
     }
 
     fn open_editor(&mut self) {
-        let Some((abs, line, col)) = self.editor_target() else { return };
-        match crate::editor::open(&self.cfg.editor_command, &self.git_root, &abs, line, col) {
+        let Some((root, abs, line, col)) = self.editor_target() else { return };
+        match crate::editor::open(&self.cfg.editor_command, &root, &abs, line, col) {
             Ok(()) if self.cfg.quit_after_open => self.quit = true,
             Ok(()) => self.message = Some(format!("opened {}:{line}:{col}", abs.display())),
             Err(e) => self.message = Some(e),
@@ -640,7 +730,7 @@ impl App {
                 // Inner area starts one cell inside the border.
                 let row = self.list_offset + (ev.row - self.areas.list.y - 1) as usize;
                 if row < self.row_count() {
-                    self.set_row(row);
+                    self.set_row(row, false);
                 }
             }
             _ => {}
@@ -735,50 +825,51 @@ impl App {
     pub fn setting_value(&self, i: usize) -> String {
         let on_off = |b: bool| if b { "on" } else { "off" }.to_string();
         match i {
-            0 => match self.folder.mode {
+            item::MODE => match self.folder.mode {
                 Mode::Literal => "literal".into(),
                 Mode::Regex => "regex".into(),
             },
-            1 => match self.cfg.case {
+            item::CASE => match self.cfg.case {
                 Case::Smart => "smart".into(),
                 Case::Sensitive => "sensitive".into(),
                 Case::Insensitive => "insensitive".into(),
             },
-            2 => on_off(self.folder.hidden),
-            3 => on_off(self.folder.no_ignore),
-            4 => match self.cfg.list_mode {
+            item::HIDDEN => on_off(self.folder.hidden),
+            item::IGNORED => on_off(self.folder.no_ignore),
+            item::LIST => match self.cfg.list_mode {
                 ListMode::File => "per file".into(),
                 ListMode::Match => "per match".into(),
             },
-            5 => on_off(self.cfg.wrap),
-            6 => if self.cfg.quit_after_open { "quit" } else { "stay open" }.into(),
-            7 => self.cfg.max_file_size_mb.to_string(),
-            8 => self.cfg.max_files.to_string(),
-            9 => self.cfg.min_query_len.to_string(),
-            10 => self.cfg.theme.clone(),
-            11 => self.cfg.editor_command.clone(),
-            12 => if self.folder_saved { "press Enter" } else { "(using defaults)" }.into(),
-            13 => if self.store.writable { "ok" } else { "INVALID - Enter overwrites it" }.into(),
+            item::GROUP => on_off(self.cfg.group_by_repo),
+            item::WRAP => on_off(self.cfg.wrap),
+            item::AFTER_OPEN => if self.cfg.quit_after_open { "quit" } else { "stay open" }.into(),
+            item::MAX_SIZE => self.cfg.max_file_size_mb.to_string(),
+            item::MAX_FILES => self.cfg.max_files.to_string(),
+            item::MIN_QUERY => self.cfg.min_query_len.to_string(),
+            item::THEME => self.cfg.theme.clone(),
+            item::EDITOR => self.cfg.editor_command.clone(),
+            item::RESET => if self.folder_saved { "press Enter" } else { "(using defaults)" }.into(),
+            item::CONFIG => if self.store.writable { "ok" } else { "INVALID - Enter overwrites it" }.into(),
             _ => String::new(),
         }
     }
 
     fn change_setting(&mut self, i: usize, dir: i64) {
         match i {
-            0 => {
+            item::MODE => {
                 let mode = if self.folder.mode == Mode::Literal { Mode::Regex } else { Mode::Literal };
                 self.update_folder(|f| f.mode = mode);
             }
-            2 => {
+            item::HIDDEN => {
                 let v = !self.folder.hidden;
                 self.update_folder(|f| f.hidden = v);
             }
-            3 => {
+            item::IGNORED => {
                 let v = !self.folder.no_ignore;
                 self.update_folder(|f| f.no_ignore = v);
             }
-            4 => self.toggle_list_mode(),
-            12 => {
+            item::LIST => self.toggle_list_mode(),
+            item::RESET => {
                 if self.folder_saved {
                     self.cfg.folders.remove(&self.folder_key);
                     self.saved_folder = self.cfg.global_folder_defaults();
@@ -789,7 +880,7 @@ impl App {
                     self.start_search();
                 }
             }
-            13 => {
+            item::CONFIG => {
                 if !self.store.writable {
                     self.store.writable = true;
                     self.cfg_dirty = true;
@@ -803,17 +894,21 @@ impl App {
 
     fn change_global(&mut self, i: usize, dir: i64) {
         match i {
-            1 => {
+            item::CASE => {
                 let all = [Case::Smart, Case::Sensitive, Case::Insensitive];
                 let cur = all.iter().position(|c| *c == self.cfg.case).unwrap_or(0) as i64;
                 self.cfg.case = all[(cur + dir).rem_euclid(3) as usize];
             }
-            5 => self.toggle_wrap(),
-            6 => self.cfg.quit_after_open = !self.cfg.quit_after_open,
-            7 => self.cfg.max_file_size_mb = (self.cfg.max_file_size_mb as i64 + dir).max(1) as u64,
-            8 => self.cfg.max_files = (self.cfg.max_files as i64 + dir * 1000).max(100) as usize,
-            9 => self.cfg.min_query_len = (self.cfg.min_query_len as i64 + dir).max(1) as usize,
-            10 => {
+            item::GROUP => {
+                self.cfg.group_by_repo = !self.cfg.group_by_repo;
+                self.offsets_dirty = true;
+            }
+            item::WRAP => self.toggle_wrap(),
+            item::AFTER_OPEN => self.cfg.quit_after_open = !self.cfg.quit_after_open,
+            item::MAX_SIZE => self.cfg.max_file_size_mb = (self.cfg.max_file_size_mb as i64 + dir).max(1) as u64,
+            item::MAX_FILES => self.cfg.max_files = (self.cfg.max_files as i64 + dir * 1000).max(100) as usize,
+            item::MIN_QUERY => self.cfg.min_query_len = (self.cfg.min_query_len as i64 + dir).max(1) as usize,
+            item::THEME => {
                 let names = crate::preview::theme_names();
                 if names.is_empty() {
                     return;
@@ -824,7 +919,7 @@ impl App {
             _ => return,
         }
         self.cfg_dirty = true;
-        if matches!(i, 1 | 7 | 8 | 9) {
+        if matches!(i, item::CASE | item::MAX_SIZE | item::MAX_FILES | item::MIN_QUERY) {
             self.start_search();
         }
     }
@@ -833,17 +928,17 @@ impl App {
         let text = text.trim();
         let num = text.parse::<u64>();
         match (i, num) {
-            (7, Ok(n)) if n > 0 => self.cfg.max_file_size_mb = n,
-            (8, Ok(n)) if n > 0 => self.cfg.max_files = n as usize,
-            (9, Ok(n)) if n > 0 => self.cfg.min_query_len = n as usize,
-            (11, _) if !text.is_empty() => self.cfg.editor_command = text.to_string(),
+            (item::MAX_SIZE, Ok(n)) if n > 0 => self.cfg.max_file_size_mb = n,
+            (item::MAX_FILES, Ok(n)) if n > 0 => self.cfg.max_files = n as usize,
+            (item::MIN_QUERY, Ok(n)) if n > 0 => self.cfg.min_query_len = n as usize,
+            (item::EDITOR, _) if !text.is_empty() => self.cfg.editor_command = text.to_string(),
             _ => {
                 self.message = Some(format!("invalid value: {text}"));
                 return;
             }
         }
         self.cfg_dirty = true;
-        if i != 11 {
+        if i != item::EDITOR {
             self.start_search();
         }
     }
@@ -881,7 +976,7 @@ impl App {
                 self.change_setting(cursor, 1)
             }
             KeyCode::Enter => match cursor {
-                7..=9 | 11 => {
+                item::MAX_SIZE | item::MAX_FILES | item::MIN_QUERY | item::EDITOR => {
                     let v = self.setting_value(cursor);
                     if let Popup::Settings(s) = &mut self.popup {
                         s.editing = Some(v);
@@ -924,8 +1019,69 @@ mod tests {
     }
 
     fn file(rel: &str) -> FileResult {
+        file_in(Path::new("/repo"), rel)
+    }
+
+    fn file_in(repo: &Path, rel: &str) -> FileResult {
         let m = search::build_matcher("x", Mode::Literal, Case::Smart).unwrap();
-        FileResult { rel: rel.into(), matches: search::occurrences(&m, 1, "x"), truncated: false }
+        FileResult {
+            rel: rel.into(),
+            repo: Arc::from(repo),
+            matches: search::occurrences(&m, 1, "x"),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn results_are_grouped_by_repository() {
+        let root = PathBuf::from("/git");
+        let alpha = root.join("alpha");
+        let beta = root.join("beta");
+        let mut app = App::new(Config::default(), no_store(), root.clone(), root.clone(), vec![], false);
+        let rel = |r: &str, p: &str| Path::new(r).join(p).to_string_lossy().into_owned();
+        app.insert_file(file_in(&beta, &rel("beta", "b.cs")));
+        app.insert_file(file_in(&alpha, &rel("alpha", "src/a.cs")));
+        app.insert_file(file_in(&alpha, &rel("alpha", "z.cs")));
+
+        assert!(app.is_grouped());
+        let rows: Vec<RowRef> = (0..app.row_count()).map(|r| app.row_ref(r)).collect();
+        use RowRef::{Header, Item};
+        assert_eq!(rows, vec![Header(0), Item(0, 0), Item(1, 0), Header(2), Item(2, 0)]);
+        assert_eq!(app.repo_label(&alpha), "alpha");
+        assert_eq!(app.display_path(&app.files[0]), Path::new("src/a.cs").to_string_lossy());
+
+        // Navigation never lands on a header.
+        app.on_key(key(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.sel_row(), 1);
+        app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!((app.sel_file, app.sel_row()), (2, 4), "skips the beta header going down");
+        app.on_key(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!((app.sel_file, app.sel_row()), (1, 2), "skips it going up");
+        app.on_key(key(KeyCode::Up, KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.sel_row(), 1, "stays on the first item");
+
+        // Enter opens the file's own repository.
+        let (folder, abs, ..) = app.editor_target().unwrap();
+        assert_eq!(folder, alpha);
+        assert_eq!(abs, root.join(rel("alpha", "src/a.cs")));
+
+        // Grouping can be switched off.
+        app.cfg.group_by_repo = false;
+        app.offsets_dirty = true;
+        assert!(!app.is_grouped());
+        assert_eq!(app.row_count(), 3);
+    }
+
+    #[test]
+    fn single_repository_has_no_headers() {
+        let mut app = App::new(Config::default(), no_store(), "/r".into(), "/r".into(), vec![], false);
+        app.insert_file(file("a.rs"));
+        app.insert_file(file("b.rs"));
+        assert!(!app.is_grouped());
+        assert_eq!(app.row_count(), 2);
+        assert_eq!(app.display_path(&app.files[0]), "a.rs");
     }
 
     #[test]
@@ -935,9 +1091,9 @@ mod tests {
         let mut app = app_in(&dir, no_store(), Config::default(), vec![], false);
         search(&mut app, "foo");
         assert_eq!(app.total_matches, 2);
-        assert_eq!(app.editor_target().unwrap().2, 1);
+        assert_eq!(app.editor_target().unwrap().3, 1);
         app.on_key(key(KeyCode::Char('n'), KeyModifiers::CONTROL));
-        let (_, line, col) = app.editor_target().unwrap();
+        let (_, _, line, col) = app.editor_target().unwrap();
         assert_eq!((line, col), (1, 5));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1001,7 +1157,7 @@ mod tests {
         // ...until the user explicitly overwrites it.
         app.on_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
         if let Popup::Settings(s) = &mut app.popup {
-            s.cursor = 13;
+            s.cursor = item::CONFIG;
         }
         app.on_key(key(KeyCode::Enter, KeyModifiers::NONE));
         let (cfg, store, _) = Config::load_from(Some(path.clone()));
@@ -1030,7 +1186,7 @@ mod tests {
         assert_eq!(app.folder.mode, Mode::Regex);
         app.on_key(key(KeyCode::Char('o'), KeyModifiers::CONTROL));
         if let Popup::Settings(s) = &mut app.popup {
-            s.cursor = 2; // Include hidden
+            s.cursor = item::HIDDEN;
         }
         app.on_key(key(KeyCode::Right, KeyModifiers::NONE));
         assert!(app.folder.hidden && app.folder.mode == Mode::Regex, "override still active this run");

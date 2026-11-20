@@ -31,6 +31,7 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 - Default: one row per file, e.g. `path (N)`. Configurable (Ctrl+L or settings): one row per occurrence, e.g. `path:line:col  text`, with that occurrence highlighted strongly.
 - Sorted by path while results stream in. The selection stays on the same occurrence, not the same row index. After a new search, the previous selection is selected again when it reappears, unless you have already picked something else.
 - Paths are relative to the search root and shortened from the left (`…core/src/test.rs`), so the file name stays visible.
+- Grouped by repository (setting "Group by repository", on by default). A file's repository is found the same way as for folder settings: the nearest folder above it containing `.git`, otherwise the search folder. When results come from more than one repository, each group gets a header row (`─ api ───`), and paths in the group are relative to that repository. ↑/↓ and clicks skip header rows. Within one repository the list looks exactly as without grouping.
 - Tree view: later, not in v1.
 
 ## Preview
@@ -42,7 +43,7 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 
 ## Opening in the editor
 - Enter runs `editor_command`. Default: `code {root} -g {file}:{line}:{col}`. `{col}` counts UTF-16 code units, like VS Code: in `😀foo`, `f` is column 3.
-- `{root}` is the nearest git root above the search path. Without a git repo, it's the search path itself.
+- `{root}` is the repository of the selected file (see grouping above). Without a git repo, it's the search path itself.
 - The TUI stays open by default. Configurable: quit after opening.
 
 ## Keys (single focus: typing always goes to the search box)

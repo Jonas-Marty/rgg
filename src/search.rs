@@ -6,7 +6,8 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::types::{Types, TypesBuilder};
 use ignore::{WalkBuilder, WalkState};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -45,6 +46,9 @@ pub struct Occurrence {
 pub struct FileResult {
     /// Path relative to the search root.
     pub rel: PathBuf,
+    /// Repository the file belongs to: nearest ancestor containing `.git`,
+    /// or the search root when there is none (same rule as folder settings).
+    pub repo: Arc<Path>,
     pub matches: Vec<Occurrence>,
     /// More than `MAX_PER_FILE` occurrences exist; only the first ones are kept.
     pub truncated: bool,
@@ -125,6 +129,8 @@ pub fn spawn(
             let found = found.clone();
             let limit = limit.clone();
             let root = params.root.clone();
+            let fallback: Arc<Path> = Arc::from(params.root.as_path());
+            let mut repos: HashMap<PathBuf, Arc<Path>> = HashMap::new();
             let max_files = params.max_files;
             let mut searcher = SearcherBuilder::new()
                 .binary_detection(BinaryDetection::quit(b'\x00'))
@@ -165,7 +171,9 @@ pub fn spawn(
                     .strip_prefix(&root)
                     .unwrap_or(entry.path())
                     .to_path_buf();
-                let file = FileResult { rel, matches, truncated };
+                let dir = entry.path().parent().unwrap_or(&root);
+                let repo = repo_of(dir, &mut repos, &fallback);
+                let file = FileResult { rel, repo, matches, truncated };
                 if tx.send(Msg::File { generation, file }).is_err() {
                     return WalkState::Quit;
                 }
@@ -180,6 +188,31 @@ pub fn spawn(
             });
         }
     });
+}
+
+/// Nearest ancestor of `dir` (inclusive) containing `.git`, else `fallback`.
+/// Every directory visited is cached, so each is checked at most once per worker.
+pub fn repo_of(dir: &Path, cache: &mut HashMap<PathBuf, Arc<Path>>, fallback: &Arc<Path>) -> Arc<Path> {
+    let mut visited = Vec::new();
+    let mut found = None;
+    let mut cur = Some(dir);
+    while let Some(d) = cur {
+        if let Some(r) = cache.get(d) {
+            found = Some(r.clone());
+            break;
+        }
+        visited.push(d.to_path_buf());
+        if d.join(".git").exists() {
+            found = Some(Arc::from(d));
+            break;
+        }
+        cur = d.parent();
+    }
+    let repo = found.unwrap_or_else(|| fallback.clone());
+    for d in visited {
+        cache.insert(d, repo.clone());
+    }
+    repo
 }
 
 /// All non-empty occurrences on one line.
@@ -331,6 +364,28 @@ mod tests {
         let many = res.iter().find(|f| f.rel.ends_with("many.txt")).unwrap();
         assert_eq!((exact.matches.len(), exact.truncated), (MAX_PER_FILE, false));
         assert_eq!((many.matches.len(), many.truncated), (MAX_PER_FILE, true));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_know_their_repository() {
+        let dir = temp_dir("repos");
+        for sub in ["alpha", "beta", "beta/nested"] {
+            std::fs::create_dir_all(dir.join(sub).join(".git")).unwrap();
+        }
+        std::fs::create_dir_all(dir.join("alpha/src")).unwrap();
+        std::fs::create_dir_all(dir.join("loose")).unwrap();
+        std::fs::write(dir.join("alpha/src/a.cs"), "foo").unwrap();
+        std::fs::write(dir.join("beta/b.cs"), "foo").unwrap();
+        std::fs::write(dir.join("beta/nested/n.cs"), "foo").unwrap();
+        std::fs::write(dir.join("loose/l.cs"), "foo").unwrap();
+        let res = run(&dir, "foo", Mode::Literal, &[]);
+        let repo = |name: &str| res.iter().find(|f| f.rel.ends_with(name)).unwrap().repo.to_path_buf();
+        assert_eq!(repo("a.cs"), dir.join("alpha"));
+        assert_eq!(repo("b.cs"), dir.join("beta"));
+        assert_eq!(repo("n.cs"), dir.join("beta/nested"));
+        // No repository above the temp dir: falls back to the search root.
+        assert_eq!(repo("l.cs"), dir);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

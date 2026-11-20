@@ -57,6 +57,22 @@ Drawn at 120×32 cells. `▓…▓` marks the current match (strong highlight), 
  ↑↓ select · Enter open in VS Code · ^R regex · ^T types · Alt+W wrap · ^O settings · F1 help · Esc quit
 ```
 
+## 2b. Results from several repositories (search started in `D:\Git`)
+
+```
+┌ Files ──────────────────────────────────────┐
+│─ api ───────────────────────────────────────│
+│▶ src\Controllers\OrderController.cs     (3) │
+│  src\Services\OrderService.cs           (1) │
+│─ web ───────────────────────────────────────│
+│  src\app\orders\order.component.ts      (2) │
+│─ tools\scripts ─────────────────────────────│
+│  deploy.ps1                             (1) │
+└─────────────────────────────────────────────┘
+```
+
+Enter on `OrderController.cs` opens `D:\Git\api` in VS Code.
+
 ## 3. Invalid regex
 
 ```
