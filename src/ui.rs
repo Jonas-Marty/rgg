@@ -2,7 +2,7 @@
 
 use crate::app::{App, Areas, FOLDER_SETTINGS, Popup, RowRef, SETTINGS, Status, VALUE_SETTINGS};
 use crate::config::{Case, ListMode, Mode};
-use crate::preview::{compose, current_style, match_style, sanitize, wrap_line};
+use crate::preview::{CURRENT_BG, compose, current_style, match_style, sanitize, wrap_line};
 use crate::search::MAX_PER_FILE;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -14,17 +14,25 @@ const ACCENT: Color = Color::Rgb(130, 170, 255);
 const DIM: Color = Color::DarkGray;
 const SEL_BG: Color = Color::Rgb(45, 55, 85);
 
+/// Border of the list and preview: highlighted while the split handle is hovered or dragged.
+fn pane_border(app: &App) -> Style {
+    Style::default().fg(if app.split_hover { ACCENT } else { DIM })
+}
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let [main, footer] = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).areas(f.area());
-    let [left, right] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(main);
+    let [left, right] =
+        Layout::horizontal([Constraint::Length(app.left_width(main.width)), Constraint::Fill(1)]).areas(main);
     let [search, status, list] =
         Layout::vertical([Constraint::Length(3), Constraint::Length(2), Constraint::Min(3)]).areas(left);
-    app.areas = Areas { list, preview: right };
+    app.areas = Areas { main, list, preview: right };
 
     draw_search(f, app, search);
     draw_status(f, app, status);
     draw_list(f, app, list);
-    draw_preview(f, app, right);
+    if app.show_preview {
+        draw_preview(f, app, right);
+    }
     draw_footer(f, app, footer);
 
     match &app.popup {
@@ -131,7 +139,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
         ListMode::File => " Files ",
         ListMode::Match => " Matches ",
     };
-    let block = Block::bordered().title(title).border_style(Style::default().fg(DIM));
+    let block = Block::bordered().title(title).border_style(pane_border(app));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let h = inner.height as usize;
@@ -217,7 +225,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     let inner_h = area.height.saturating_sub(2) as usize;
     app.sync_preview(inner_h, area.width.saturating_sub(2) as usize);
-    let mut block = Block::bordered().border_style(Style::default().fg(DIM));
+    let mut block = Block::bordered().border_style(pane_border(app));
     let Some((file, m)) = app.selected() else {
         let hint = Paragraph::new(Line::from(Span::styled(" no file selected", Style::default().fg(DIM))));
         f.render_widget(hint.block(block.title(" Preview ")), area);
@@ -225,6 +233,7 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     };
     let rel = file.rel.to_string_lossy().into_owned();
     let cur_line = (m.line as usize).saturating_sub(1);
+    let match_lines: Vec<usize> = file.matches.iter().map(|o| (o.line as usize).saturating_sub(1)).collect();
     let current = Some((cur_line, m.start, m.end));
     let right = match app.cfg.list_mode {
         ListMode::File => format!(
@@ -253,11 +262,15 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
     };
     // Each source line takes at least one row, so `h` lines always fill the view.
     let text = preview.render(top, h, matcher.as_ref(), current);
+    let total = preview.lines.len();
+    // Last source line (exclusive) that is at least partly visible.
+    let mut bottom = top;
 
     let mut rows = Vec::with_capacity(h);
     let mut nums = Vec::with_capacity(h);
     for (k, line) in text.into_iter().enumerate() {
         let i = top + k;
+        bottom = i + 1;
         let pieces = if wrap { wrap_line(line, tw) } else { vec![line] };
         let skip = if k == 0 && wrap { sub } else { 0 };
         for (r, piece) in pieces.into_iter().enumerate().skip(skip) {
@@ -282,6 +295,47 @@ fn draw_preview(f: &mut Frame, app: &mut App, area: Rect) {
         let x = if col + 8 > bw { col.saturating_sub(bw / 3) } else { 0 };
         f.render_widget(Paragraph::new(rows).scroll((0, x.min(u16::MAX as usize) as u16)), body);
     }
+    draw_scrollbar(f, area, total, top..bottom, &match_lines, cur_line);
+}
+
+const THUMB: Color = Color::Rgb(150, 155, 175);
+const MARK: Color = Color::Rgb(200, 150, 40);
+
+/// Track row of source line `line` in a scrollbar of `h` rows for a file of `total` lines.
+pub fn scrollbar_row(line: usize, total: usize, h: usize) -> usize {
+    (line * h / total.max(1)).min(h.saturating_sub(1))
+}
+
+/// Scrollbar on the preview's right border: a thumb for the visible lines, a marker for every
+/// match (the current one brighter), and the visible line range on the bottom border.
+fn draw_scrollbar(f: &mut Frame, area: Rect, total: usize, visible: std::ops::Range<usize>, matches: &[usize], cur: usize) {
+    if area.width < 3 || area.height < 3 || total == 0 {
+        return;
+    }
+    let h = area.height as usize - 2;
+    let x = area.right() - 1;
+    let (y0, y1) = (scrollbar_row(visible.start, total, h), visible.end * h);
+    let y1 = y1.div_ceil(total).clamp(y0 + 1, h);
+    let buf = f.buffer_mut();
+    for r in y0..y1 {
+        buf[(x, area.y + 1 + r as u16)].set_symbol("┃").set_style(Style::default().fg(THUMB));
+    }
+    let mut cur_row = None;
+    for &l in matches {
+        let r = scrollbar_row(l, total, h);
+        if l == cur {
+            cur_row = Some(r);
+        }
+        buf[(x, area.y + 1 + r as u16)].set_symbol("■").set_style(Style::default().fg(MARK));
+    }
+    if let Some(r) = cur_row {
+        buf[(x, area.y + 1 + r as u16)].set_symbol("■").set_style(Style::default().fg(CURRENT_BG));
+    }
+    let pos = format!(" {}–{}/{} ", visible.start + 1, visible.end.max(visible.start + 1), total);
+    let w = pos.chars().count() as u16;
+    if w + 4 < area.width {
+        buf.set_string(area.right() - 2 - w, area.bottom() - 1, pos, Style::default().fg(DIM));
+    }
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
@@ -293,11 +347,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ("Enter open in VS Code", 1),
         ("^R regex", 2),
         ("^T types", 2),
-        ("Alt+W wrap", 4),
         ("^O settings", 2),
         ("F1 help", 1),
         ("Esc quit", 1),
     ]);
+    if app.show_preview {
+        entries.insert(entries.len() - 3, ("Alt+W wrap", 4));
+    }
     let width = |e: &[(&str, u8)]| e.iter().map(|(s, _)| s.chars().count() + 3).sum::<usize>();
     while width(&entries) > area.width as usize && entries.len() > 1 {
         let worst = entries
@@ -429,10 +485,13 @@ fn draw_help(f: &mut Frame) {
         ("Ctrl+L", "toggle per-file / per-match list"),
         ("Ctrl+O", "settings"),
         ("Alt+W", "toggle preview wrap"),
+        ("Alt+P", "hide / show preview"),
+        ("Alt+← →", "resize list / preview"),
         ("Ctrl+Backspace / Ctrl+W", "delete previous word"),
         ("Ctrl+U", "clear search"),
         ("Mouse wheel", "scroll list / preview"),
         ("Click", "select row"),
+        ("Drag pane border", "resize (double-click: reset)"),
         ("F1", "this help"),
         ("Esc", "close popup / quit"),
     ];
@@ -532,6 +591,33 @@ mod tests {
         let s = screen(&mut app);
         println!("{s}");
         assert!(s.contains("main.cs:5"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn preview_scrollbar_marks_matches() {
+        let dir = std::env::temp_dir().join(format!("rgg-ui-sb-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let text: String = (1..=100).map(|i| if i == 10 || i == 90 { "needle
+".to_string() } else { format!("line {i}
+") }).collect();
+        std::fs::write(dir.join("big.txt"), text).unwrap();
+
+        let store = Store { path: None, writable: true };
+        let mut app = App::new(Config::default(), store, dir.clone(), dir.clone(), vec![], false);
+        app.query = "needle".into();
+        app.cursor = 6;
+        app.start_search();
+        let start = std::time::Instant::now();
+        while app.is_busy() && start.elapsed().as_secs() < 5 {
+            app.tick();
+        }
+        let s = screen(&mut app);
+        println!("{s}");
+        let bar: String = s.lines().skip(1).take(17).map(|l| l.chars().last().unwrap()).collect();
+        assert_eq!(bar.matches('■').count(), 2, "one marker per match: {bar}");
+        assert!(bar.contains('┃'), "thumb: {bar}");
+        assert!(s.contains("/100 "), "visible range on bottom border");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

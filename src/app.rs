@@ -14,6 +14,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEBOUNCE: Duration = Duration::from_millis(150);
+/// Default share of the left pane, in per mille of the width.
+const SPLIT_DEFAULT: u16 = 400;
+/// Alt+←/→ step, in per mille.
+const SPLIT_STEP: u16 = 50;
+/// Narrowest a pane gets while the terminal is wide enough for both.
+const PANE_MIN: u16 = 20;
+/// Two clicks on the split handle within this time reset the split.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 pub enum Status {
     Idle,
@@ -94,7 +102,10 @@ pub enum Popup {
 
 #[derive(Default, Clone, Copy)]
 pub struct Areas {
+    /// Both panes together (everything above the footer).
+    pub main: Rect,
     pub list: Rect,
+    /// Empty while the preview is hidden.
     pub preview: Rect,
 }
 
@@ -162,6 +173,15 @@ pub struct App {
 
     pub popup: Popup,
     pub areas: Areas,
+    /// Left pane share in per mille. Session only, never saved.
+    split: u16,
+    pub show_preview: bool,
+    /// The mouse is over the split handle (or dragging it).
+    pub split_hover: bool,
+    split_drag: bool,
+    /// Dragging the preview scrollbar.
+    scroll_drag: bool,
+    last_split_click: Option<Instant>,
     pub quit: bool,
 }
 
@@ -223,8 +243,67 @@ impl App {
             synced: None,
             popup: Popup::None,
             areas: Areas::default(),
+            split: SPLIT_DEFAULT,
+            show_preview: true,
+            split_hover: false,
+            split_drag: false,
+            scroll_drag: false,
+            last_split_click: None,
             quit: false,
         }
+    }
+
+    /// Width of the left pane for a main area `total` columns wide.
+    pub fn left_width(&self, total: u16) -> u16 {
+        if !self.show_preview {
+            return total;
+        }
+        let w = (total as u32 * self.split as u32 / 1000) as u16;
+        if total >= 2 * PANE_MIN { w.clamp(PANE_MIN, total - PANE_MIN) } else { w }
+    }
+
+    /// Moves the split by `delta` per mille, showing the preview again if it was hidden.
+    fn nudge_split(&mut self, delta: i16) {
+        if !self.show_preview {
+            self.show_preview = true;
+            return;
+        }
+        // Start from the width actually shown, so a clamped split moves at once.
+        let total = self.areas.main.width.max(1);
+        let shown = (self.left_width(total) as u32 * 1000 / total as u32) as i16;
+        self.split = (shown + delta).clamp(0, 1000) as u16;
+    }
+
+    fn on_split_handle(&self, pos: Position) -> bool {
+        let (main, preview) = (self.areas.main, self.areas.preview);
+        self.show_preview
+            && preview.width > 0
+            && main.contains(pos)
+            && (pos.x == preview.x || pos.x + 1 == preview.x)
+    }
+
+    /// The preview's right border, which doubles as its scrollbar.
+    fn on_scrollbar(&self, pos: Position) -> bool {
+        let p = self.areas.preview;
+        self.show_preview
+            && self.preview.is_some()
+            && p.width >= 3
+            && pos.x + 1 == p.right()
+            && pos.y > p.y
+            && pos.y + 1 < p.bottom()
+    }
+
+    /// Centres the preview on the file position under scrollbar row `y` (screen coordinates).
+    fn jump_preview(&mut self, y: u16) {
+        let Some(p) = &self.preview else { return };
+        let area = self.areas.preview;
+        let h = area.height.saturating_sub(2).max(1) as usize;
+        let r = (y.saturating_sub(area.y + 1) as usize).min(h - 1);
+        let total = p.lines.len();
+        // Middle of the file range this track row stands for.
+        let line = ((2 * r + 1) * total / (2 * h)).min(total.saturating_sub(1));
+        self.preview_top = line.saturating_sub(h / 2);
+        self.preview_sub = 0;
     }
 
     pub fn is_busy(&self) -> bool {
@@ -620,6 +699,9 @@ impl App {
                 self.toggle_wrap();
                 self.save_config();
             }
+            KeyCode::Char('p') | KeyCode::Char('P') if alt => self.show_preview = !self.show_preview,
+            KeyCode::Left if alt => self.nudge_split(-(SPLIT_STEP as i16)),
+            KeyCode::Right if alt => self.nudge_split(SPLIT_STEP as i16),
             KeyCode::Char('w') | KeyCode::Char('h') if ctrl => self.delete_word(),
             KeyCode::Backspace if ctrl || alt => self.delete_word(),
             KeyCode::Backspace => {
@@ -716,12 +798,39 @@ impl App {
 
     pub fn on_mouse(&mut self, ev: MouseEvent) {
         if !matches!(self.popup, Popup::None) {
+            self.split_hover = false;
+            self.split_drag = false;
+            self.scroll_drag = false;
             return;
         }
         let pos = Position::new(ev.column, ev.row);
+        let on_handle = self.on_split_handle(pos);
         let in_list = self.areas.list.contains(pos);
         let in_preview = self.areas.preview.contains(pos);
         match ev.kind {
+            MouseEventKind::Down(MouseButton::Left) if on_handle => {
+                let now = Instant::now();
+                if self.last_split_click.is_some_and(|t| now - t < DOUBLE_CLICK) {
+                    self.split = SPLIT_DEFAULT;
+                    self.last_split_click = None;
+                } else {
+                    self.last_split_click = Some(now);
+                    self.split_drag = true;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.split_drag => {
+                let main = self.areas.main;
+                // Put the left pane's right border under the pointer.
+                let left = (ev.column.saturating_sub(main.x) as u32 + 1).min(main.width as u32);
+                self.split = (left * 1000 / main.width.max(1) as u32) as u16;
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.split_drag => self.split_drag = false,
+            MouseEventKind::Down(MouseButton::Left) if self.on_scrollbar(pos) => {
+                self.scroll_drag = true;
+                self.jump_preview(ev.row);
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.scroll_drag => self.jump_preview(ev.row),
+            MouseEventKind::Up(MouseButton::Left) if self.scroll_drag => self.scroll_drag = false,
             MouseEventKind::ScrollDown if in_list => self.move_rows(1),
             MouseEventKind::ScrollUp if in_list => self.move_rows(-1),
             MouseEventKind::ScrollDown if in_preview => self.scroll_preview(3),
@@ -735,6 +844,7 @@ impl App {
             }
             _ => {}
         }
+        self.split_hover = self.split_drag || on_handle;
     }
 
     // -------------------------------------------------------------- settings

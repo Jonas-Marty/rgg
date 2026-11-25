@@ -2,14 +2,14 @@
 
 A fast TUI for finding text in files (ripgrep engine) and jumping to VS Code at the match.
 
-![rgg demo: live search, file-type filter, per-match list and regex mode](docs/demo.svg)
+![rgg demo: live search, file-type filter, per-match list, regex mode and pane resizing](docs/demo.svg)
 
 ```
 rgg [PATH] [-t TYPE]... [--regex]
 ```
 
 - Type to search (live). ↑↓ select, Enter opens VS Code with the repo folder at the file and line.
-- Ctrl+R literal/regex · Ctrl+T file types · Ctrl+O settings · Ctrl+L per-file/per-match list · Alt+W wrap · F1 help.
+- Ctrl+R literal/regex · Ctrl+T file types · Ctrl+O settings · Ctrl+L per-file/per-match list · Alt+W wrap · Alt+P hide/show preview · Alt+←/→ or drag the pane border to resize · F1 help.
 - Config: `%USERPROFILE%\.rgg\config.toml`. File types, hidden, ignored and mode are remembered per git root.
 
 See [docs/design.md](docs/design.md) and [docs/mockup.md](docs/mockup.md).

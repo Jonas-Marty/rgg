@@ -57,11 +57,13 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 | Ctrl+T | file type picker |
 | Ctrl+O | settings |
 | Alt+W | toggle preview wrap |
+| Alt+P | hide / show the preview |
+| Alt+← / Alt+→ | move the list/preview split by 5 % |
 | Ctrl+Backspace | delete the previous word in the search box |
 | F1 | help overlay |
 | Esc | close popup, otherwise quit |
 
-Mouse: the wheel scrolls the pane under the cursor (list or preview). Clicking a row in the list selects it.
+Mouse: the wheel scrolls the pane under the cursor (list or preview). Clicking a row in the list selects it. Dragging the border between list and preview resizes them (both borders light up while hovered); double-clicking it resets the split to 40/60. The split and hidden preview last for the session only and are not saved. The preview's right border is a scrollbar: the thumb shows the visible part of the file, `■` marks every match (the current one in yellow), and clicking or dragging on it jumps there; the bottom border shows the visible line range.
 
 ## Config
 `~/.rgg/config.toml` (on Windows: `%USERPROFILE%\.rgg\config.toml`). Written only when a setting actually changes, through a temp file and a rename, so the write is atomic. Nothing is ever written into the searched repositories.

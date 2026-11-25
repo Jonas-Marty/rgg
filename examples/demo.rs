@@ -41,6 +41,8 @@ const CW: f64 = 8.4; // cell width (px)
 const CH: f64 = 18.0; // cell height (px)
 const PAD: f64 = 12.0;
 const BAR: f64 = 28.0; // window title bar
+/// How long a keystroke stays in the overlay after the key is pressed.
+const KEY_SHOWN_MS: u64 = 1400;
 const FG: &str = "#d4d4d4";
 const BG: &str = "#1e1e1e";
 
@@ -56,11 +58,39 @@ fn key(code: KeyCode) -> Step {
 fn ctrl(c: char) -> Step {
     Step::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
 }
+fn alt(code: KeyCode) -> Step {
+    Step::Key(KeyEvent::new(code, KeyModifiers::ALT))
+}
 
-/// A captured screen: cells plus where the cursor is (if shown) and how long it stays.
+/// How a key press is shown in the overlay, e.g. "Ctrl+N" or "Alt+→".
+fn key_label(k: &KeyEvent) -> String {
+    let key = match k.code {
+        KeyCode::Char(' ') => "Space".into(),
+        KeyCode::Char(c) if k.modifiers.is_empty() => c.to_string(),
+        KeyCode::Char(c) => c.to_ascii_uppercase().to_string(),
+        KeyCode::Up => "↑".into(),
+        KeyCode::Down => "↓".into(),
+        KeyCode::Left => "←".into(),
+        KeyCode::Right => "→".into(),
+        KeyCode::Enter => "Enter".into(),
+        KeyCode::Esc => "Esc".into(),
+        other => format!("{other:?}"),
+    };
+    let mut out = String::new();
+    for (m, name) in [(KeyModifiers::CONTROL, "Ctrl+"), (KeyModifiers::ALT, "Alt+"), (KeyModifiers::SHIFT, "Shift+")] {
+        if k.modifiers.contains(m) {
+            out.push_str(name);
+        }
+    }
+    out + &key
+}
+
+/// A captured screen: cells plus where the cursor is (if shown), the keystroke shown in the
+/// overlay (if any) and how long it stays.
 struct Frame {
     buf: Buffer,
     cursor: Option<(u16, u16)>,
+    keys: Option<String>,
     ms: u64,
 }
 
@@ -117,37 +147,71 @@ fn main() {
         key(Down),
         Step::Hold(500),
         key(Down),
+        Step::Hold(1500),
+        // Resize the panes, hide and show the preview.
+        alt(Right),
+        Step::Hold(400),
+        alt(Right),
+        Step::Hold(400),
+        alt(Right),
+        Step::Hold(1200),
+        alt(Char('p')),
+        Step::Hold(1500),
+        alt(Char('p')),
+        Step::Hold(900),
+        alt(Left),
+        Step::Hold(400),
+        alt(Left),
+        Step::Hold(400),
+        alt(Left),
         Step::Hold(2500),
     ];
 
     let mut frames: Vec<Frame> = Vec::new();
     let mut still: Option<Frame> = None;
-    capture(&mut term, &mut app, &mut frames, 0);
+    capture(&mut term, &mut app, &mut frames, None, 0);
+    // The last key pressed and how often in a row, while its overlay is still showing.
+    let mut repeat: Option<(String, u32)> = None;
+    let mut since_key = 0;
     for (i, step) in script.iter().enumerate() {
         match step {
-            Step::Hold(ms) => frames.last_mut().unwrap().ms += ms,
+            Step::Hold(ms) => {
+                frames.last_mut().unwrap().ms += ms;
+                since_key += ms;
+            }
             Step::Key(k) => {
                 app.on_key(*k);
-                capture(&mut term, &mut app, &mut frames, 120);
+                let label = key_label(k);
+                let count = match repeat {
+                    Some((ref last, n)) if *last == label && since_key < KEY_SHOWN_MS => n + 1,
+                    _ => 1,
+                };
+                let shown = if count > 1 { format!("{label} ×{count}") } else { label.clone() };
+                repeat = Some((label, count));
+                since_key = 0;
+                capture(&mut term, &mut app, &mut frames, Some(shown), 120);
             }
             Step::Type(s) => {
-                for c in s.chars() {
+                repeat = None;
+                for (n, c) in s.char_indices() {
                     app.on_key(KeyEvent::new(Char(c), KeyModifiers::NONE));
-                    capture(&mut term, &mut app, &mut frames, 110);
+                    let typed = s[..n + c.len_utf8()].to_string();
+                    capture(&mut term, &mut app, &mut frames, Some(typed), 110);
                 }
             }
         }
         // The still: Rust-only file list, second match of the selected file.
         if i == 10 {
             let f = frames.last().unwrap();
-            still = Some(Frame { buf: f.buf.clone(), cursor: f.cursor, ms: 0 });
+            still = Some(Frame { buf: f.buf.clone(), cursor: f.cursor, keys: None, ms: 0 });
         }
     }
+    let frames = fade_keys(frames);
 
     // For checking single frames: DEMO_FRAMES=<dir> writes each frame as its own SVG.
     if let Some(dir) = std::env::var_os("DEMO_FRAMES") {
         for (i, f) in frames.iter().enumerate() {
-            let one = Frame { buf: f.buf.clone(), cursor: f.cursor, ms: 0 };
+            let one = Frame { buf: f.buf.clone(), cursor: f.cursor, keys: f.keys.clone(), ms: 0 };
             std::fs::write(Path::new(&dir).join(format!("{i:02}.svg")), render(&[one], false)).unwrap();
         }
     }
@@ -164,8 +228,29 @@ fn main() {
     );
 }
 
+/// Splits frames that stay up long so the keystroke overlay disappears after `KEY_SHOWN_MS`.
+fn fade_keys(frames: Vec<Frame>) -> Vec<Frame> {
+    let mut out = Vec::with_capacity(frames.len());
+    for f in frames {
+        if f.keys.is_some() && f.ms > KEY_SHOWN_MS + 200 {
+            let rest = Frame { buf: f.buf.clone(), cursor: f.cursor, keys: None, ms: f.ms - KEY_SHOWN_MS };
+            out.push(Frame { ms: KEY_SHOWN_MS, ..f });
+            out.push(rest);
+        } else {
+            out.push(f);
+        }
+    }
+    out
+}
+
 /// Lets searches and preview highlighting finish, then draws one frame.
-fn capture(term: &mut Terminal<TestBackend>, app: &mut App, frames: &mut Vec<Frame>, ms: u64) {
+fn capture(
+    term: &mut Terminal<TestBackend>,
+    app: &mut App,
+    frames: &mut Vec<Frame>,
+    keys: Option<String>,
+    ms: u64,
+) {
     let start = Instant::now();
     loop {
         app.tick();
@@ -187,11 +272,12 @@ fn capture(term: &mut Terminal<TestBackend>, app: &mut App, frames: &mut Vec<Fra
     if let Some(last) = frames.last_mut()
         && last.buf == buf
         && last.cursor == cursor
+        && keys.is_none()
     {
         last.ms += ms;
         return;
     }
-    frames.push(Frame { buf, cursor, ms });
+    frames.push(Frame { buf, cursor, keys, ms });
 }
 
 fn color(c: Color, default: &str) -> String {
@@ -287,6 +373,20 @@ fn row_svg(buf: &Buffer, y: u16, cursor: Option<u16>) -> String {
     out
 }
 
+/// The keystroke box, bottom right just above the footer, in terminal coordinates.
+fn key_overlay(keys: &str) -> String {
+    const SIZE: f64 = 16.0; // font size
+    let char_w = CW * SIZE / 14.0;
+    let w = keys.chars().count() as f64 * char_w + 30.0;
+    let h = 34.0;
+    let x = COLS as f64 * CW - w - 14.0;
+    let y = (ROWS - 2) as f64 * CH - h - 6.0;
+    format!(
+        r##"<g transform="translate({x:.1},{y:.1})"><rect width="{w:.1}" height="{h}" rx="7" fill="#11151f" fill-opacity="0.92" stroke="#82aaff" stroke-width="1.5"/><text x="15" y="22.5" fill="#ffffff" font-size="{SIZE}" font-weight="bold">{}</text></g>"##,
+        esc(keys)
+    )
+}
+
 /// Renders frames as an SVG window. With several frames, each frame is a stack of shared rows
 /// and a CSS animation steps through them.
 fn render(frames: &[Frame], animate: bool) -> String {
@@ -309,6 +409,9 @@ fn render(frames: &[Frame], animate: bool) -> String {
                 n
             });
             let _ = write!(groups, r##"<use href="#r{id}" y="{:.1}"/>"##, y as f64 * CH);
+        }
+        if let Some(keys) = &f.keys {
+            groups.push_str(&key_overlay(keys));
         }
         groups.push_str("</g>");
     }
