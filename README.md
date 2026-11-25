@@ -2,6 +2,8 @@
 
 A fast TUI for finding text in files (ripgrep engine) and jumping to VS Code at the match.
 
+![rgg demo: live search, file-type filter, per-match list and regex mode](docs/demo.svg)
+
 ```
 rgg [PATH] [-t TYPE]... [--regex]
 ```
@@ -21,3 +23,11 @@ cargo build --release
 The binary is `target/release/rgg.exe`. Install it on PATH with `cargo install --path .`.
 
 On Windows, Rust needs the MSVC linker ("Desktop development with C++" in Visual Studio).
+
+## Demo
+
+`docs/demo.svg` and `docs/screenshot.svg` are rendered from the real UI with scripted key presses (no screen recorder needed):
+
+```
+cargo run --release --example demo
+```
