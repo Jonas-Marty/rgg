@@ -837,8 +837,12 @@ impl App {
             KeyCode::Down => self.move_rows(1),
             KeyCode::PageUp => self.move_rows(-page),
             KeyCode::PageDown => self.move_rows(page),
-            KeyCode::Home => self.set_row(0, false),
-            KeyCode::End => self.set_row(usize::MAX, false),
+            KeyCode::Home if ctrl => self.set_row(0, false),
+            KeyCode::End if ctrl => self.set_row(usize::MAX, false),
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.query.len(),
+            KeyCode::Char('a') if ctrl => self.cursor = 0,
+            KeyCode::Char('e') if ctrl => self.cursor = self.query.len(),
             KeyCode::Enter => self.open_editor(),
             KeyCode::F(1) => self.popup = Popup::Help,
             _ => {}
@@ -1337,7 +1341,7 @@ mod tests {
         assert_eq!(app.display_path(&app.files[0]), Path::new("src/a.cs").to_string_lossy());
 
         // Navigation never lands on a header.
-        app.on_key(key(KeyCode::Home, KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Home, KeyModifiers::CONTROL));
         assert_eq!(app.sel_row(), 1);
         app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
         app.on_key(key(KeyCode::Down, KeyModifiers::NONE));
@@ -1523,6 +1527,22 @@ mod tests {
         again.use_history(Some(path.clone()));
         assert_eq!(q(&again), ["alpha", r"foo\(\d\)"]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn home_end_move_the_text_cursor() {
+        let mut app = App::new(Config::default(), no_store(), "/r".into(), "/r".into(), vec![], false);
+        for c in "foo".chars() {
+            app.on_key(key(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(key(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(app.cursor, 0);
+        app.on_key(key(KeyCode::End, KeyModifiers::NONE));
+        assert_eq!(app.cursor, 3);
+        app.on_key(key(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert_eq!(app.cursor, 0);
+        app.on_key(key(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert_eq!(app.cursor, 3);
     }
 
     #[test]

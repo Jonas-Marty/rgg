@@ -496,7 +496,9 @@ fn draw_settings(f: &mut Frame, app: &App) {
 fn draw_help(f: &mut Frame) {
     let keys = [
         ("type", "search text (live)"),
-        ("↑ ↓ / PgUp PgDn / Home End", "move in result list"),
+        ("↑ ↓ / PgUp PgDn", "move in result list"),
+        ("Ctrl+Home / Ctrl+End", "first / last result"),
+        ("Home End / Ctrl+A Ctrl+E", "start / end of search text"),
         ("Ctrl+N / Ctrl+P", "next / previous match in file"),
         ("Ctrl+↑ ↓ / Ctrl+PgUp PgDn", "scroll preview"),
         ("Enter", "open in editor at match"),
@@ -598,7 +600,7 @@ mod tests {
             app.tick();
         }
         // Selection follows the first file to arrive; pick the top row explicitly.
-        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL));
         let s = screen(&mut app);
         println!("{s}");
         assert!(s.contains("2 files · 3 matches"), "status line");

@@ -49,7 +49,9 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 ## Keys (single focus: typing always goes to the search box)
 | Key | Action |
 |---|---|
-| ↑ / ↓, PgUp / PgDn, Home / End | move in the result list |
+| ↑ / ↓, PgUp / PgDn | move in the result list |
+| Ctrl+Home / Ctrl+End | first / last result (see the VS Code note below) |
+| Home / End, Ctrl+A / Ctrl+E | start / end of the search text |
 | Ctrl+N / Ctrl+P | next/prev match in the selected file (per-file mode) |
 | Ctrl+↑ / Ctrl+↓ | scroll the preview |
 | Enter | open in VS Code at the current match |
@@ -63,6 +65,15 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 | Ctrl+Backspace | delete the previous word part in the search box: `getUserName` → `getUser`, `max_file` → `max_` (also Ctrl+W, Ctrl+H, Ctrl+_ for terminals that send those) |
 | F1 | help overlay |
 | Esc | close popup, otherwise quit |
+
+In VS Code's integrated terminal, Ctrl+Home / Ctrl+End scroll the terminal and never reach rgg. To pass them through, add to VS Code's `settings.json`:
+
+```json
+"terminal.integrated.commandsToSkipShell": [
+  "-workbench.action.terminal.scrollToTop",
+  "-workbench.action.terminal.scrollToBottom"
+]
+```
 
 Mouse: the wheel scrolls the pane under the cursor (list or preview). Clicking a row in the list selects it. Dragging the border between list and preview resizes them (both borders light up while hovered); double-clicking it resets the split to 40/60. The split and hidden preview last for the session only and are not saved. The preview's right border is a scrollbar: the thumb shows the visible part of the file, `■` marks every match (the current one in yellow), and clicking or dragging on it jumps there; the bottom border shows the visible line range.
 
