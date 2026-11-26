@@ -16,6 +16,8 @@ mod app;
 mod config;
 #[path = "../src/editor.rs"]
 mod editor;
+#[path = "../src/history.rs"]
+mod history;
 #[path = "../src/preview.rs"]
 mod preview;
 #[path = "../src/search.rs"]

@@ -59,6 +59,7 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 | Alt+W | toggle preview wrap |
 | Alt+P | hide / show the preview |
 | Alt+← / Alt+→ | move the list/preview split by `resize_step` columns (default 2) |
+| Alt+↑ / Alt+↓ | older / newer search from the history of this repository |
 | Ctrl+Backspace | delete the previous word in the search box |
 | F1 | help overlay |
 | Esc | close popup, otherwise quit |
@@ -71,6 +72,12 @@ Mouse: the wheel scrolls the pane under the cursor (list or preview). Clicking a
 If the file can't be read or parsed, rgg starts with defaults and never writes to it. Settings → "Config file" overwrites it, and only when you choose that.
 
 CLI flags (`-t`, `--regex`) apply to that run only. Changing a per-folder setting saves only that setting, never a CLI override.
+
+### Search history
+
+A search is added to the history when Enter opens a result, and when rgg quits with a query that has results. Typing alone never adds anything, so partial queries stay out. Each repository (git root, same key as folder settings) has its own list, newest first; searching the same text again moves it to the top, and only `history_size` entries are kept. An entry stores the query and whether it was a regex.
+
+Alt+↑ goes to older entries and Alt+↓ to newer ones; past the newest, the text you had typed comes back. A recalled query is searched at once, and a regex entry switches to regex mode for this session without changing the folder setting. Typing or editing ends browsing. History lives in `~/.rgg/history.toml`, separate from the config, and every write re-reads it so several rgg windows don't overwrite each other. Settings → "Clear history of this repository" empties the list.
 
 ### Per-folder settings
 - Keyed by the git root (or the search path when there's no git repo). Stored in the same user config file, never in the repo.
@@ -92,6 +99,7 @@ max_file_size_mb = 10
 max_files = 10000
 min_query_len = 2
 resize_step = 2             # columns per Alt+←/→
+history_size = 100          # searches kept per repository, 0 = off
 theme = "base16-ocean.dark"
 editor_command = "code {root} -g {file}:{line}:{col}"
 

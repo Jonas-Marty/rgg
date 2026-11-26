@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod editor;
+mod history;
 mod preview;
 mod search;
 mod ui;
@@ -87,10 +88,12 @@ fn main() {
 
     let mut app = App::new(cfg, store, search_root, root, args.types, args.regex);
     app.message = warning;
+    app.use_history(history::default_path());
 
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = run(&mut terminal, &mut app);
+    app.record_history();
     let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     if let Err(e) = result {

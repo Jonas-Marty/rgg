@@ -56,6 +56,8 @@ pub struct Config {
     pub min_query_len: usize,
     /// Columns Alt+←/→ moves the list/preview split.
     pub resize_step: u16,
+    /// Search history entries kept per repository; 0 turns history off.
+    pub history_size: usize,
     pub theme: String,
     pub editor_command: String,
     pub folders: BTreeMap<String, FolderSettings>,
@@ -77,6 +79,7 @@ impl Default for Config {
             max_files: 10_000,
             min_query_len: 2,
             resize_step: 2,
+            history_size: 100,
             theme: "base16-ocean.dark".into(),
             editor_command: "code {root} -g {file}:{line}:{col}".into(),
             folders: BTreeMap::new(),

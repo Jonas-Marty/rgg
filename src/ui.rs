@@ -509,6 +509,7 @@ fn draw_help(f: &mut Frame) {
         ("Alt+← →", "resize list / preview"),
         ("Ctrl+Backspace / Ctrl+W", "delete previous word"),
         ("Ctrl+U", "clear search"),
+        ("Alt+↑ ↓", "search history (this repository)"),
         ("Mouse wheel", "scroll list / preview"),
         ("Click", "select row"),
         ("Drag pane border", "resize (double-click: reset)"),

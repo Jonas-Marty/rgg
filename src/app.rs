@@ -1,6 +1,7 @@
 //! Application state and input handling.
 
 use crate::config::{Case, Config, FolderSettings, ListMode, Mode, Store};
+use crate::history;
 use crate::preview::Preview;
 use crate::search::{self, FileResult, Msg, Occurrence};
 use grep_regex::RegexMatcher;
@@ -63,10 +64,12 @@ pub mod item {
     pub const MAX_FILES: usize = 9;
     pub const MIN_QUERY: usize = 10;
     pub const RESIZE_STEP: usize = 11;
-    pub const THEME: usize = 12;
-    pub const EDITOR: usize = 13;
-    pub const RESET: usize = 14;
-    pub const CONFIG: usize = 15;
+    pub const HISTORY_SIZE: usize = 12;
+    pub const THEME: usize = 13;
+    pub const EDITOR: usize = 14;
+    pub const RESET: usize = 15;
+    pub const CLEAR_HISTORY: usize = 16;
+    pub const CONFIG: usize = 17;
 }
 
 pub const SETTINGS: &[&str] = &[
@@ -82,16 +85,28 @@ pub const SETTINGS: &[&str] = &[
     "Max files",
     "Min query length",
     "Resize step (columns)",
+    "History size (0 = off)",
     "Theme",
     "Editor command",
     "Reset folder to defaults",
+    "Clear history of this repository",
     "Config file",
 ];
 /// Settings that are stored per folder.
 pub const FOLDER_SETTINGS: &[usize] = &[item::MODE, item::HIDDEN, item::IGNORED];
 /// Settings shown as plain values instead of ‹ choices ›.
 pub const VALUE_SETTINGS: &[usize] =
-    &[item::MAX_SIZE, item::MAX_FILES, item::MIN_QUERY, item::RESIZE_STEP, item::EDITOR, item::RESET, item::CONFIG];
+    &[
+    item::MAX_SIZE,
+    item::MAX_FILES,
+    item::MIN_QUERY,
+    item::RESIZE_STEP,
+    item::HISTORY_SIZE,
+    item::EDITOR,
+    item::RESET,
+    item::CLEAR_HISTORY,
+    item::CONFIG,
+];
 
 pub enum Popup {
     None,
@@ -182,6 +197,14 @@ pub struct App {
     /// Dragging the preview scrollbar.
     scroll_drag: bool,
     last_split_click: Option<Instant>,
+
+    /// Search history file; `None` keeps history in memory only (tests).
+    history_path: Option<PathBuf>,
+    /// History of this repository, newest first.
+    history: Vec<history::Entry>,
+    /// Alt+Up/Down browsing: index into `history`, and what was typed before browsing started.
+    history_pos: Option<usize>,
+    history_draft: Option<history::Entry>,
     pub quit: bool,
 }
 
@@ -249,8 +272,80 @@ impl App {
             split_drag: false,
             scroll_drag: false,
             last_split_click: None,
+            history_path: None,
+            history: Vec::new(),
+            history_pos: None,
+            history_draft: None,
             quit: false,
         }
+    }
+
+    /// Loads the search history of this repository from `path` and saves to it from now on.
+    pub fn use_history(&mut self, path: Option<PathBuf>) {
+        self.history = history::load(path.as_deref(), &self.folder_key);
+        self.history_path = path;
+    }
+
+    fn current_entry(&self) -> history::Entry {
+        history::Entry { query: self.query.clone(), regex: self.folder.mode == Mode::Regex }
+    }
+
+    /// Alt+Up (`older` = true) / Alt+Down through the history.
+    fn recall_history(&mut self, older: bool) {
+        let pos = match (self.history_pos, older) {
+            (None, true) if !self.history.is_empty() => {
+                self.history_draft = Some(self.current_entry());
+                Some(0)
+            }
+            (None, _) => return,
+            (Some(p), true) => Some((p + 1).min(self.history.len() - 1)),
+            (Some(0), false) => None,
+            (Some(p), false) => Some(p - 1),
+        };
+        let entry = match pos {
+            Some(p) => self.history[p].clone(),
+            None => self.history_draft.take().unwrap_or_else(|| self.current_entry()),
+        };
+        self.history_pos = pos;
+        self.query = entry.query;
+        self.cursor = self.query.len();
+        // Session only, like --regex: the folder's saved mode stays as it is.
+        self.folder.mode = if entry.regex { Mode::Regex } else { Mode::Literal };
+        self.start_search();
+    }
+
+    /// Remembers the current query (on open and on quit) if it is a real search with results.
+    pub fn record_history(&mut self) {
+        if self.cfg.history_size == 0
+            || self.query.trim().chars().count() < self.cfg.min_query_len.max(1)
+            || self.files.is_empty()
+        {
+            return;
+        }
+        let entry = self.current_entry();
+        let limit = self.cfg.history_size;
+        match &self.history_path {
+            Some(path) => match history::update(path, &self.folder_key, |l| history::push(l, entry, limit)) {
+                Ok(list) => self.history = list,
+                Err(e) => self.message = Some(format!("cannot save history: {e}")),
+            },
+            None => history::push(&mut self.history, entry, limit),
+        }
+        self.history_pos = None;
+        self.history_draft = None;
+    }
+
+    fn clear_history(&mut self) {
+        if let Some(path) = &self.history_path
+            && let Err(e) = history::update(path, &self.folder_key, |l| l.clear())
+        {
+            self.message = Some(format!("cannot clear history: {e}"));
+            return;
+        }
+        self.history.clear();
+        self.history_pos = None;
+        self.history_draft = None;
+        self.message = Some("history cleared".into());
     }
 
     /// Width of the left pane for a main area `total` columns wide.
@@ -346,6 +441,9 @@ impl App {
     }
 
     fn query_changed(&mut self) {
+        // Editing ends history browsing: the text is a new query.
+        self.history_pos = None;
+        self.history_draft = None;
         self.pending_since = Some(Instant::now());
     }
 
@@ -703,6 +801,8 @@ impl App {
             KeyCode::Char('p') | KeyCode::Char('P') if alt => self.show_preview = !self.show_preview,
             KeyCode::Left if alt => self.nudge_split(-(self.cfg.resize_step.max(1) as i32)),
             KeyCode::Right if alt => self.nudge_split(self.cfg.resize_step.max(1) as i32),
+            KeyCode::Up if alt => self.recall_history(true),
+            KeyCode::Down if alt => self.recall_history(false),
             KeyCode::Char('w') | KeyCode::Char('h') if ctrl => self.delete_word(),
             KeyCode::Backspace if ctrl || alt => self.delete_word(),
             KeyCode::Backspace => {
@@ -790,7 +890,11 @@ impl App {
 
     fn open_editor(&mut self) {
         let Some((root, abs, line, col)) = self.editor_target() else { return };
-        match crate::editor::open(&self.cfg.editor_command, &root, &abs, line, col) {
+        let opened = crate::editor::open(&self.cfg.editor_command, &root, &abs, line, col);
+        if opened.is_ok() {
+            self.record_history();
+        }
+        match opened {
             Ok(()) if self.cfg.quit_after_open => self.quit = true,
             Ok(()) => self.message = Some(format!("opened {}:{line}:{col}", abs.display())),
             Err(e) => self.message = Some(e),
@@ -958,6 +1062,8 @@ impl App {
             item::MAX_FILES => self.cfg.max_files.to_string(),
             item::MIN_QUERY => self.cfg.min_query_len.to_string(),
             item::RESIZE_STEP => self.cfg.resize_step.to_string(),
+            item::HISTORY_SIZE => self.cfg.history_size.to_string(),
+            item::CLEAR_HISTORY => if self.history.is_empty() { "(empty)" } else { "press Enter" }.into(),
             item::THEME => self.cfg.theme.clone(),
             item::EDITOR => self.cfg.editor_command.clone(),
             item::RESET => if self.folder_saved { "press Enter" } else { "(using defaults)" }.into(),
@@ -992,6 +1098,11 @@ impl App {
                     self.start_search();
                 }
             }
+            item::CLEAR_HISTORY => {
+                if !self.history.is_empty() {
+                    self.clear_history();
+                }
+            }
             item::CONFIG => {
                 if !self.store.writable {
                     self.store.writable = true;
@@ -1021,6 +1132,9 @@ impl App {
             item::MAX_FILES => self.cfg.max_files = (self.cfg.max_files as i64 + dir * 1000).max(100) as usize,
             item::MIN_QUERY => self.cfg.min_query_len = (self.cfg.min_query_len as i64 + dir).max(1) as usize,
             item::RESIZE_STEP => self.cfg.resize_step = (self.cfg.resize_step as i64 + dir).clamp(1, 200) as u16,
+            item::HISTORY_SIZE => {
+                self.cfg.history_size = (self.cfg.history_size as i64 + dir * 10).clamp(0, 10_000) as usize
+            }
             item::THEME => {
                 let names = crate::preview::theme_names();
                 if names.is_empty() {
@@ -1045,6 +1159,7 @@ impl App {
             (item::MAX_FILES, Ok(n)) if n > 0 => self.cfg.max_files = n as usize,
             (item::MIN_QUERY, Ok(n)) if n > 0 => self.cfg.min_query_len = n as usize,
             (item::RESIZE_STEP, Ok(n)) if (1..=200).contains(&n) => self.cfg.resize_step = n as u16,
+            (item::HISTORY_SIZE, Ok(n)) if n <= 10_000 => self.cfg.history_size = n as usize,
             (item::EDITOR, _) if !text.is_empty() => self.cfg.editor_command = text.to_string(),
             _ => {
                 self.message = Some(format!("invalid value: {text}"));
@@ -1052,7 +1167,7 @@ impl App {
             }
         }
         self.cfg_dirty = true;
-        if !matches!(i, item::EDITOR | item::RESIZE_STEP) {
+        if !matches!(i, item::EDITOR | item::RESIZE_STEP | item::HISTORY_SIZE) {
             self.start_search();
         }
     }
@@ -1090,7 +1205,12 @@ impl App {
                 self.change_setting(cursor, 1)
             }
             KeyCode::Enter => match cursor {
-                item::MAX_SIZE | item::MAX_FILES | item::MIN_QUERY | item::RESIZE_STEP | item::EDITOR => {
+                item::MAX_SIZE
+                | item::MAX_FILES
+                | item::MIN_QUERY
+                | item::RESIZE_STEP
+                | item::HISTORY_SIZE
+                | item::EDITOR => {
                     let v = self.setting_value(cursor);
                     if let Popup::Settings(s) = &mut self.popup {
                         s.editing = Some(v);
@@ -1106,6 +1226,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::search::temp_dir;
     use ratatui::crossterm::event::KeyEvent;
     use std::path::Path;
@@ -1294,6 +1415,62 @@ mod tests {
             app.on_key(key(KeyCode::Left, KeyModifiers::ALT));
             assert_eq!(app.left_width(total), before - 3, "width {total}");
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn history_is_recorded_recalled_and_kept_per_repository() {
+        let dir = temp_dir("hist");
+        std::fs::write(dir.join("a.txt"), "alpha beta\nfoo(1)\n").unwrap();
+        let path = dir.join("history.toml");
+        let mut app = app_in(&dir, no_store(), Config::default(), vec![], false);
+        app.use_history(Some(path.clone()));
+
+        // No results: not recorded. Results: recorded once, newest first.
+        search(&mut app, "zzz");
+        app.record_history();
+        search(&mut app, "alpha");
+        app.record_history();
+        app.folder.mode = Mode::Regex;
+        search(&mut app, r"foo\(\d\)");
+        app.record_history();
+        app.folder.mode = Mode::Literal;
+        search(&mut app, "alpha");
+        app.record_history();
+        let q = |a: &App| a.history.iter().map(|e| e.query.clone()).collect::<Vec<_>>();
+        assert_eq!(q(&app), ["alpha", r"foo\(\d\)"]);
+
+        // Browsing: draft is kept, regex mode comes back with the entry, Alt+Down returns to the draft.
+        app.query = "bet".into();
+        app.cursor = 3;
+        let alt = |c| key(c, KeyModifiers::ALT);
+        app.on_key(alt(KeyCode::Up));
+        assert_eq!(app.query, "alpha");
+        app.on_key(alt(KeyCode::Up));
+        assert_eq!((app.query.as_str(), app.folder.mode), (r"foo\(\d\)", Mode::Regex));
+        app.on_key(alt(KeyCode::Up));
+        assert_eq!(app.query, r"foo\(\d\)", "stops at the oldest entry");
+        assert_eq!(app.saved_folder.mode, Mode::Literal, "recalled mode is not saved for the folder");
+        app.on_key(alt(KeyCode::Down));
+        app.on_key(alt(KeyCode::Down));
+        assert_eq!((app.query.as_str(), app.folder.mode), ("bet", Mode::Literal));
+
+        // Typing ends browsing.
+        app.on_key(alt(KeyCode::Up));
+        app.on_key(key(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.query, "alphax");
+        app.on_key(alt(KeyCode::Down));
+        assert_eq!(app.query, "alphax");
+
+        // Persisted per repository.
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let mut elsewhere = app_in(&other, no_store(), Config::default(), vec![], false);
+        elsewhere.use_history(Some(path.clone()));
+        assert!(elsewhere.history.is_empty());
+        let mut again = app_in(&dir, no_store(), Config::default(), vec![], false);
+        again.use_history(Some(path.clone()));
+        assert_eq!(q(&again), ["alpha", r"foo\(\d\)"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
