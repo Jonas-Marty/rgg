@@ -16,8 +16,6 @@ use std::time::{Duration, Instant};
 const DEBOUNCE: Duration = Duration::from_millis(150);
 /// Default share of the left pane, in per mille of the width.
 const SPLIT_DEFAULT: u16 = 400;
-/// Alt+←/→ step, in per mille.
-const SPLIT_STEP: u16 = 50;
 /// Narrowest a pane gets while the terminal is wide enough for both.
 const PANE_MIN: u16 = 20;
 /// Two clicks on the split handle within this time reset the split.
@@ -64,10 +62,11 @@ pub mod item {
     pub const MAX_SIZE: usize = 8;
     pub const MAX_FILES: usize = 9;
     pub const MIN_QUERY: usize = 10;
-    pub const THEME: usize = 11;
-    pub const EDITOR: usize = 12;
-    pub const RESET: usize = 13;
-    pub const CONFIG: usize = 14;
+    pub const RESIZE_STEP: usize = 11;
+    pub const THEME: usize = 12;
+    pub const EDITOR: usize = 13;
+    pub const RESET: usize = 14;
+    pub const CONFIG: usize = 15;
 }
 
 pub const SETTINGS: &[&str] = &[
@@ -82,6 +81,7 @@ pub const SETTINGS: &[&str] = &[
     "Max file size (MB)",
     "Max files",
     "Min query length",
+    "Resize step (columns)",
     "Theme",
     "Editor command",
     "Reset folder to defaults",
@@ -91,7 +91,7 @@ pub const SETTINGS: &[&str] = &[
 pub const FOLDER_SETTINGS: &[usize] = &[item::MODE, item::HIDDEN, item::IGNORED];
 /// Settings shown as plain values instead of ‹ choices ›.
 pub const VALUE_SETTINGS: &[usize] =
-    &[item::MAX_SIZE, item::MAX_FILES, item::MIN_QUERY, item::EDITOR, item::RESET, item::CONFIG];
+    &[item::MAX_SIZE, item::MAX_FILES, item::MIN_QUERY, item::RESIZE_STEP, item::EDITOR, item::RESET, item::CONFIG];
 
 pub enum Popup {
     None,
@@ -262,16 +262,17 @@ impl App {
         if total >= 2 * PANE_MIN { w.clamp(PANE_MIN, total - PANE_MIN) } else { w }
     }
 
-    /// Moves the split by `delta` per mille, showing the preview again if it was hidden.
-    fn nudge_split(&mut self, delta: i16) {
+    /// Moves the split by `delta` columns, showing the preview again if it was hidden.
+    fn nudge_split(&mut self, delta: i32) {
         if !self.show_preview {
             self.show_preview = true;
             return;
         }
         // Start from the width actually shown, so a clamped split moves at once.
         let total = self.areas.main.width.max(1);
-        let shown = (self.left_width(total) as u32 * 1000 / total as u32) as i16;
-        self.split = (shown + delta).clamp(0, 1000) as u16;
+        let left = (self.left_width(total) as i32 + delta).clamp(0, total as i32);
+        // Round up so `left_width` gives back exactly `left` columns.
+        self.split = ((left * 1000 + total as i32 - 1) / total as i32) as u16;
     }
 
     fn on_split_handle(&self, pos: Position) -> bool {
@@ -700,8 +701,8 @@ impl App {
                 self.save_config();
             }
             KeyCode::Char('p') | KeyCode::Char('P') if alt => self.show_preview = !self.show_preview,
-            KeyCode::Left if alt => self.nudge_split(-(SPLIT_STEP as i16)),
-            KeyCode::Right if alt => self.nudge_split(SPLIT_STEP as i16),
+            KeyCode::Left if alt => self.nudge_split(-(self.cfg.resize_step.max(1) as i32)),
+            KeyCode::Right if alt => self.nudge_split(self.cfg.resize_step.max(1) as i32),
             KeyCode::Char('w') | KeyCode::Char('h') if ctrl => self.delete_word(),
             KeyCode::Backspace if ctrl || alt => self.delete_word(),
             KeyCode::Backspace => {
@@ -956,6 +957,7 @@ impl App {
             item::MAX_SIZE => self.cfg.max_file_size_mb.to_string(),
             item::MAX_FILES => self.cfg.max_files.to_string(),
             item::MIN_QUERY => self.cfg.min_query_len.to_string(),
+            item::RESIZE_STEP => self.cfg.resize_step.to_string(),
             item::THEME => self.cfg.theme.clone(),
             item::EDITOR => self.cfg.editor_command.clone(),
             item::RESET => if self.folder_saved { "press Enter" } else { "(using defaults)" }.into(),
@@ -1018,6 +1020,7 @@ impl App {
             item::MAX_SIZE => self.cfg.max_file_size_mb = (self.cfg.max_file_size_mb as i64 + dir).max(1) as u64,
             item::MAX_FILES => self.cfg.max_files = (self.cfg.max_files as i64 + dir * 1000).max(100) as usize,
             item::MIN_QUERY => self.cfg.min_query_len = (self.cfg.min_query_len as i64 + dir).max(1) as usize,
+            item::RESIZE_STEP => self.cfg.resize_step = (self.cfg.resize_step as i64 + dir).clamp(1, 200) as u16,
             item::THEME => {
                 let names = crate::preview::theme_names();
                 if names.is_empty() {
@@ -1041,6 +1044,7 @@ impl App {
             (item::MAX_SIZE, Ok(n)) if n > 0 => self.cfg.max_file_size_mb = n,
             (item::MAX_FILES, Ok(n)) if n > 0 => self.cfg.max_files = n as usize,
             (item::MIN_QUERY, Ok(n)) if n > 0 => self.cfg.min_query_len = n as usize,
+            (item::RESIZE_STEP, Ok(n)) if (1..=200).contains(&n) => self.cfg.resize_step = n as u16,
             (item::EDITOR, _) if !text.is_empty() => self.cfg.editor_command = text.to_string(),
             _ => {
                 self.message = Some(format!("invalid value: {text}"));
@@ -1048,7 +1052,7 @@ impl App {
             }
         }
         self.cfg_dirty = true;
-        if i != item::EDITOR {
+        if !matches!(i, item::EDITOR | item::RESIZE_STEP) {
             self.start_search();
         }
     }
@@ -1086,7 +1090,7 @@ impl App {
                 self.change_setting(cursor, 1)
             }
             KeyCode::Enter => match cursor {
-                item::MAX_SIZE | item::MAX_FILES | item::MIN_QUERY | item::EDITOR => {
+                item::MAX_SIZE | item::MAX_FILES | item::MIN_QUERY | item::RESIZE_STEP | item::EDITOR => {
                     let v = self.setting_value(cursor);
                     if let Popup::Settings(s) = &mut self.popup {
                         s.editing = Some(v);
@@ -1273,6 +1277,23 @@ mod tests {
         let (cfg, store, _) = Config::load_from(Some(path.clone()));
         assert!(store.writable);
         assert_eq!(cfg.list_mode, ListMode::Match);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn alt_arrows_move_the_split_by_the_configured_columns() {
+        let dir = temp_dir("resize");
+        let cfg = Config { resize_step: 3, ..Config::default() };
+        let mut app = app_in(&dir, Store { path: None, writable: true }, cfg, vec![], false);
+        for total in [137u16, 200] {
+            app.areas.main = Rect::new(0, 0, total, 30);
+            let before = app.left_width(total);
+            app.on_key(key(KeyCode::Right, KeyModifiers::ALT));
+            assert_eq!(app.left_width(total), before + 3, "width {total}");
+            app.on_key(key(KeyCode::Left, KeyModifiers::ALT));
+            app.on_key(key(KeyCode::Left, KeyModifiers::ALT));
+            assert_eq!(app.left_width(total), before - 3, "width {total}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -54,6 +54,8 @@ pub struct Config {
     pub max_file_size_mb: u64,
     pub max_files: usize,
     pub min_query_len: usize,
+    /// Columns Alt+←/→ moves the list/preview split.
+    pub resize_step: u16,
     pub theme: String,
     pub editor_command: String,
     pub folders: BTreeMap<String, FolderSettings>,
@@ -74,6 +76,7 @@ impl Default for Config {
             max_file_size_mb: 10,
             max_files: 10_000,
             min_query_len: 2,
+            resize_step: 2,
             theme: "base16-ocean.dark".into(),
             editor_command: "code {root} -g {file}:{line}:{col}".into(),
             folders: BTreeMap::new(),

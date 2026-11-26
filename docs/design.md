@@ -58,7 +58,7 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 | Ctrl+O | settings |
 | Alt+W | toggle preview wrap |
 | Alt+P | hide / show the preview |
-| Alt+← / Alt+→ | move the list/preview split by 5 % |
+| Alt+← / Alt+→ | move the list/preview split by `resize_step` columns (default 2) |
 | Ctrl+Backspace | delete the previous word in the search box |
 | F1 | help overlay |
 | Esc | close popup, otherwise quit |
@@ -91,6 +91,7 @@ quit_after_open = false
 max_file_size_mb = 10
 max_files = 10000
 min_query_len = 2
+resize_step = 2             # columns per Alt+←/→
 theme = "base16-ocean.dark"
 editor_command = "code {root} -g {file}:{line}:{col}"
 
