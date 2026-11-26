@@ -803,7 +803,8 @@ impl App {
             KeyCode::Right if alt => self.nudge_split(self.cfg.resize_step.max(1) as i32),
             KeyCode::Up if alt => self.recall_history(true),
             KeyCode::Down if alt => self.recall_history(false),
-            KeyCode::Char('w') | KeyCode::Char('h') if ctrl => self.delete_word(),
+            // Ctrl+Backspace arrives as Ctrl+H, Ctrl+W (VS Code terminal) or Ctrl+_ (mintty), depending on the terminal.
+            KeyCode::Char('w' | 'h' | '_' | '7') if ctrl => self.delete_word(),
             KeyCode::Backspace if ctrl || alt => self.delete_word(),
             KeyCode::Backspace => {
                 if let Some(c) = self.query[..self.cursor].chars().next_back() {
@@ -851,13 +852,7 @@ impl App {
     }
 
     fn delete_word(&mut self) {
-        let before = &self.query[..self.cursor];
-        let trimmed = before.trim_end();
-        let start = trimmed
-            .char_indices()
-            .rev()
-            .find(|(_, c)| c.is_whitespace())
-            .map_or(0, |(i, c)| i + c.len_utf8());
+        let start = word_part_start(&self.query[..self.cursor]);
         if start < self.cursor {
             self.query.replace_range(start..self.cursor, "");
             self.cursor = start;
@@ -1223,10 +1218,66 @@ impl App {
     }
 }
 
+/// Start of the word part that Ctrl+Backspace deletes from the end of `s`:
+/// trailing spaces plus one CamelCase / snake_case part, or one run of punctuation.
+/// `fooBar` → `foo`, `foo_bar` → `foo_`, `parseHTTP` → `parse`, `HTTPServer` → `HTTP`.
+fn word_part_start(s: &str) -> usize {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let mut i = chars.len();
+    let prev = |i: usize| chars[i - 1].1;
+    while i > 0 && prev(i).is_whitespace() {
+        i -= 1;
+    }
+    if i == 0 {
+        return 0;
+    }
+    let c = prev(i);
+    let skip = |i: &mut usize, f: &dyn Fn(char) -> bool| {
+        while *i > 0 && f(prev(*i)) {
+            *i -= 1;
+        }
+    };
+    if c.is_numeric() {
+        skip(&mut i, &|c| c.is_numeric());
+    } else if c.is_lowercase() {
+        skip(&mut i, &|c| c.is_lowercase());
+        // The capital that starts a CamelCase part belongs to it.
+        if i > 0 && prev(i).is_uppercase() {
+            i -= 1;
+        }
+    } else if c.is_uppercase() {
+        skip(&mut i, &|c| c.is_uppercase());
+    } else if c.is_alphabetic() {
+        // Scripts without case: the whole run.
+        skip(&mut i, &|c| c.is_alphabetic() && !c.is_lowercase() && !c.is_uppercase());
+    } else {
+        skip(&mut i, &|c| !c.is_alphanumeric() && !c.is_whitespace());
+    }
+    chars.get(i).map_or(s.len(), |(b, _)| *b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn ctrl_backspace_deletes_one_word_part() {
+        let steps = |s: &str| {
+            let mut s = s.to_string();
+            let mut out = vec![];
+            while !s.is_empty() {
+                s.truncate(word_part_start(&s));
+                out.push(s.clone());
+            }
+            out
+        };
+        assert_eq!(steps("getUserName"), ["getUser", "get", ""]);
+        assert_eq!(steps("max_file_size"), ["max_file_", "max_file", "max_", "max", ""]);
+        assert_eq!(steps("HTTPServer"), ["HTTP", ""]);
+        assert_eq!(steps("parseHTTP2"), ["parseHTTP", "parse", ""]);
+        assert_eq!(steps("foo(bar) "), ["foo(bar", "foo(", "foo", ""]);
+        assert_eq!(steps("a.ÄrgerÜber"), ["a.Ärger", "a.", "a", ""]);
+    }
     use crate::search::temp_dir;
     use ratatui::crossterm::event::KeyEvent;
     use std::path::Path;

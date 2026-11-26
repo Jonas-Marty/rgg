@@ -60,7 +60,7 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 | Alt+P | hide / show the preview |
 | Alt+← / Alt+→ | move the list/preview split by `resize_step` columns (default 2) |
 | Alt+↑ / Alt+↓ | older / newer search from the history of this repository |
-| Ctrl+Backspace | delete the previous word in the search box |
+| Ctrl+Backspace | delete the previous word part in the search box: `getUserName` → `getUser`, `max_file` → `max_` (also Ctrl+W, Ctrl+H, Ctrl+_ for terminals that send those) |
 | F1 | help overlay |
 | Esc | close popup, otherwise quit |
 
