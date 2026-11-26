@@ -43,8 +43,28 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
+/// Search root for display: the home directory becomes `~`.
+fn root_label(root: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if let Some(home) = home.filter(|h| !h.is_empty())
+        && let Ok(rest) = root.strip_prefix(std::path::Path::new(&home))
+    {
+        if rest.as_os_str().is_empty() {
+            return "~".into();
+        }
+        return format!("~{}{}", std::path::MAIN_SEPARATOR, rest.to_string_lossy());
+    }
+    root.to_string_lossy().into_owned()
+}
+
 fn draw_search(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::bordered().title(" Search ").border_style(Style::default().fg(ACCENT));
+    // Room left on the top border after the corners, " Search " and a gap.
+    let max = (area.width as usize).saturating_sub(2 + 8 + 3);
+    let root = shorten_left(&root_label(&app.search_root), max);
+    let mut block = Block::bordered().title(" Search ").border_style(Style::default().fg(ACCENT));
+    if !root.is_empty() {
+        block = block.title(Line::from(Span::styled(format!(" {root} "), Style::default().fg(DIM))).right_aligned());
+    }
     let inner = block.inner(area);
     f.render_widget(block, area);
     let w = inner.width.max(1) as usize;
@@ -581,6 +601,8 @@ mod tests {
         let s = screen(&mut app);
         println!("{s}");
         assert!(s.contains("2 files · 3 matches"), "status line");
+        let name = dir.file_name().unwrap().to_string_lossy();
+        assert!(s.lines().next().unwrap().contains(&format!("{name} ┐")), "search root in search box title");
         assert!(s.contains("notes.md"));
         assert!(s.contains("main.cs"));
         assert!(s.contains("match 1/1"), "preview title for first file (notes.md)");
