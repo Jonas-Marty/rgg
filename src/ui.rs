@@ -130,6 +130,10 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         if app.folder.types.is_empty() { "all types".into() } else { app.folder.types.join(", ") },
         true,
     ));
+    if app.expression {
+        tags.push(Span::raw(" "));
+        tags.push(tag(format!("AND per {}", app.scope_name()), false));
+    }
     if app.folder.hidden {
         tags.push(Span::raw(" "));
         tags.push(tag("hidden".into(), true));
@@ -505,6 +509,8 @@ fn draw_help(f: &mut Frame) {
         ("Ctrl+R", "toggle literal / regex"),
         ("Ctrl+T", "file type picker"),
         ("Ctrl+L", "toggle per-file / per-match list"),
+        ("a AND b / a OR b / NOT c", "search expression"),
+        ("Ctrl+F", "AND / NOT per line or per file"),
         ("Ctrl+O", "settings"),
         ("Alt+W", "toggle preview wrap"),
         ("Alt+P", "hide / show preview"),

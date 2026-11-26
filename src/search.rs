@@ -1,6 +1,7 @@
 //! Search backend built on ripgrep's crates (`ignore` + `grep-searcher` + `grep-regex`).
 
-use crate::config::{Case, Mode};
+use crate::config::{Case, Mode, Scope};
+use crate::expr::Filter;
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
@@ -106,6 +107,7 @@ fn one_line(s: &str) -> String {
 pub fn spawn(
     params: Params,
     matcher: RegexMatcher,
+    filter: Option<Arc<Filter>>,
     types: Types,
     generation: u64,
     tx: Sender<Msg>,
@@ -124,6 +126,7 @@ pub fn spawn(
         let limit = Arc::new(AtomicBool::new(false));
         wb.build_parallel().run(|| {
             let matcher = matcher.clone();
+            let filter = filter.clone();
             let tx = tx.clone();
             let cancel = cancel.clone();
             let found = found.clone();
@@ -146,19 +149,76 @@ pub fn spawn(
                 }
                 let mut matches = Vec::new();
                 let mut truncated = false;
-                let _ = searcher.search_path(
-                    &matcher,
-                    entry.path(),
-                    Lossy(|lnum, line| {
-                        matches.extend(occurrences(&matcher, lnum, line));
-                        if matches.len() > MAX_PER_FILE {
+                match filter.as_deref() {
+                    None => {
+                        let _ = searcher.search_path(
+                            &matcher,
+                            entry.path(),
+                            Lossy(|lnum, line| {
+                                matches.extend(occurrences(&matcher, lnum, line));
+                                if matches.len() > MAX_PER_FILE {
+                                    matches.truncate(MAX_PER_FILE);
+                                    truncated = true;
+                                    return Ok(false);
+                                }
+                                Ok(!cancel.load(Ordering::Relaxed))
+                            }),
+                        );
+                    }
+                    // AND / NOT on the same line: lines with a positive term, then the expression.
+                    Some(f) if f.scope == Scope::Line => {
+                        let _ = searcher.search_path(
+                            &matcher,
+                            entry.path(),
+                            Lossy(|lnum, line| {
+                                if f.satisfied(f.mask(line.as_bytes())) != 0 {
+                                    matches.extend(occurrences(&matcher, lnum, line));
+                                }
+                                if matches.len() > MAX_PER_FILE {
+                                    matches.truncate(MAX_PER_FILE);
+                                    truncated = true;
+                                    return Ok(false);
+                                }
+                                Ok(!cancel.load(Ordering::Relaxed))
+                            }),
+                        );
+                    }
+                    // AND / NOT across the file: read it all, then keep the lines of the
+                    // groups the file as a whole satisfies.
+                    Some(f) => {
+                        let mut seen = 0u64;
+                        let mut lines: Vec<(u64, Vec<Occurrence>)> = Vec::new();
+                        let mut kept = 0;
+                        let _ = searcher.search_path(
+                            &f.scan,
+                            entry.path(),
+                            Lossy(|lnum, line| {
+                                let mask = f.mask(line.as_bytes());
+                                seen |= mask;
+                                if f.hopeless(seen) {
+                                    return Ok(false);
+                                }
+                                if mask & f.positive != 0 {
+                                    if kept < MAX_PER_FILE {
+                                        let occ = occurrences(&matcher, lnum, line);
+                                        kept += occ.len();
+                                        lines.push((mask, occ));
+                                    } else {
+                                        truncated = true;
+                                    }
+                                }
+                                Ok(!cancel.load(Ordering::Relaxed))
+                            }),
+                        );
+                        let keep = f.satisfied(seen);
+                        if keep != 0 {
+                            matches = lines.into_iter().filter(|(m, _)| m & keep != 0).flat_map(|(_, o)| o).collect();
                             matches.truncate(MAX_PER_FILE);
-                            truncated = true;
-                            return Ok(false);
+                        } else {
+                            truncated = false;
                         }
-                        Ok(!cancel.load(Ordering::Relaxed))
-                    }),
-                );
+                    }
+                }
                 if matches.is_empty() || cancel.load(Ordering::Relaxed) {
                     return WalkState::Continue;
                 }
@@ -287,6 +347,11 @@ mod tests {
     use std::sync::mpsc;
 
     fn run(root: &std::path::Path, q: &str, mode: Mode, types: &[String]) -> Vec<FileResult> {
+        run_in(root, q, mode, types, Scope::Line)
+    }
+
+    fn run_in(root: &std::path::Path, q: &str, mode: Mode, types: &[String], scope: Scope) -> Vec<FileResult> {
+        let (matcher, filter) = crate::expr::compile(q, mode, Case::Smart, scope).unwrap();
         let (tx, rx) = mpsc::channel();
         let params = Params {
             root: root.to_path_buf(),
@@ -297,7 +362,8 @@ mod tests {
         };
         spawn(
             params,
-            build_matcher(q, mode, Case::Smart).unwrap(),
+            matcher,
+            filter.map(Arc::new),
             build_types(types).unwrap(),
             1,
             tx,
@@ -312,6 +378,39 @@ mod tests {
         }
         out.sort_by(|a, b| a.rel.cmp(&b.rel));
         out
+    }
+
+    #[test]
+    fn expressions_apply_to_lines_or_files() {
+        let dir = temp_dir("expr");
+        std::fs::write(dir.join("both_lines.cs"), "IFoo x;
+Bar y;
+").unwrap();
+        std::fs::write(dir.join("one_line.cs"), "IFoo x = new Bar();
+").unwrap();
+        std::fs::write(dir.join("disposed.cs"), "IFoo x;
+Bar y;
+x.Dispose();
+").unwrap();
+        std::fs::write(dir.join("foo_only.cs"), "IFoo z;
+").unwrap();
+        let names = |scope, q: &str| {
+            let mut v: Vec<(String, usize)> = run_in(&dir, q, Mode::Literal, &[], scope)
+                .into_iter()
+                .map(|f| (f.rel.to_string_lossy().into_owned(), f.matches.len()))
+                .collect();
+            v.sort();
+            v
+        };
+        let s = |v: &[(&str, usize)]| v.iter().map(|(a, b)| (a.to_string(), *b)).collect::<Vec<_>>();
+        assert_eq!(names(Scope::Line, "IFoo AND Bar"), s(&[("one_line.cs", 2)]));
+        assert_eq!(
+            names(Scope::File, "IFoo AND Bar"),
+            s(&[("both_lines.cs", 2), ("disposed.cs", 2), ("one_line.cs", 2)])
+        );
+        assert_eq!(names(Scope::File, "IFoo AND NOT Dispose"), s(&[("both_lines.cs", 1), ("foo_only.cs", 1), ("one_line.cs", 1)]));
+        assert_eq!(names(Scope::Line, "Bar OR Dispose"), s(&[("both_lines.cs", 1), ("disposed.cs", 2), ("one_line.cs", 1)]));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

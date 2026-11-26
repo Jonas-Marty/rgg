@@ -1,6 +1,6 @@
 //! Application state and input handling.
 
-use crate::config::{Case, Config, FolderSettings, ListMode, Mode, Store};
+use crate::config::{Case, Config, FolderSettings, ListMode, Mode, Scope, Store};
 use crate::history;
 use crate::preview::Preview;
 use crate::search::{self, FileResult, Msg, Occurrence};
@@ -56,20 +56,21 @@ pub mod item {
     pub const CASE: usize = 1;
     pub const HIDDEN: usize = 2;
     pub const IGNORED: usize = 3;
-    pub const LIST: usize = 4;
-    pub const GROUP: usize = 5;
-    pub const WRAP: usize = 6;
-    pub const AFTER_OPEN: usize = 7;
-    pub const MAX_SIZE: usize = 8;
-    pub const MAX_FILES: usize = 9;
-    pub const MIN_QUERY: usize = 10;
-    pub const RESIZE_STEP: usize = 11;
-    pub const HISTORY_SIZE: usize = 12;
-    pub const THEME: usize = 13;
-    pub const EDITOR: usize = 14;
-    pub const RESET: usize = 15;
-    pub const CLEAR_HISTORY: usize = 16;
-    pub const CONFIG: usize = 17;
+    pub const SCOPE: usize = 4;
+    pub const LIST: usize = 5;
+    pub const GROUP: usize = 6;
+    pub const WRAP: usize = 7;
+    pub const AFTER_OPEN: usize = 8;
+    pub const MAX_SIZE: usize = 9;
+    pub const MAX_FILES: usize = 10;
+    pub const MIN_QUERY: usize = 11;
+    pub const RESIZE_STEP: usize = 12;
+    pub const HISTORY_SIZE: usize = 13;
+    pub const THEME: usize = 14;
+    pub const EDITOR: usize = 15;
+    pub const RESET: usize = 16;
+    pub const CLEAR_HISTORY: usize = 17;
+    pub const CONFIG: usize = 18;
 }
 
 pub const SETTINGS: &[&str] = &[
@@ -77,6 +78,7 @@ pub const SETTINGS: &[&str] = &[
     "Case",
     "Include hidden",
     "Include ignored",
+    "AND / NOT apply to same",
     "List mode",
     "Group by repository",
     "Wrap preview",
@@ -176,6 +178,8 @@ pub struct App {
     pending_since: Option<Instant>,
     /// Matcher of the search whose results are shown (used to highlight the preview).
     pub matcher: Option<RegexMatcher>,
+    /// The shown results come from a query with AND / OR / NOT.
+    pub expression: bool,
 
     pub preview: Option<Preview>,
     /// First source line shown in the preview.
@@ -259,6 +263,7 @@ impl App {
             rx,
             pending_since: None,
             matcher: None,
+            expression: false,
             preview: None,
             preview_top: 0,
             preview_sub: 0,
@@ -456,10 +461,9 @@ impl App {
             self.status = Status::Idle;
             return;
         }
-        let built = search::build_matcher(&self.query, self.folder.mode, self.cfg.case)
-            .map_err(|e| format!("regex error: {e}"))
+        let built = crate::expr::compile(&self.query, self.folder.mode, self.cfg.case, self.cfg.scope)
             .and_then(|m| search::build_types(&self.folder.types).map(|t| (m, t)));
-        let (matcher, types) = match built {
+        let ((matcher, filter), types) = match built {
             Ok(v) => v,
             Err(e) => {
                 // The running search belongs to an older query: stop it so it can neither
@@ -483,7 +487,8 @@ impl App {
             max_filesize: self.cfg.max_file_size_mb.max(1) * 1024 * 1024,
             max_files: self.cfg.max_files.max(1),
         };
-        search::spawn(params, matcher, types, self.generation, self.tx.clone(), self.cancel.clone());
+        self.expression = filter.is_some();
+        search::spawn(params, matcher, filter.map(Arc::new), types, self.generation, self.tx.clone(), self.cancel.clone());
     }
 
     fn cancel_running(&mut self) {
@@ -789,6 +794,7 @@ impl App {
             KeyCode::Char('n') if ctrl => self.step_match(1),
             KeyCode::Char('p') if ctrl => self.step_match(-1),
             KeyCode::Char('l') if ctrl => self.toggle_list_mode(),
+            KeyCode::Char('f') if ctrl => self.toggle_scope(),
             KeyCode::Char('u') if ctrl => {
                 self.query.clear();
                 self.cursor = 0;
@@ -872,6 +878,27 @@ impl App {
         self.offsets_dirty = true;
         self.cfg_dirty = true;
         self.save_config();
+    }
+
+    fn toggle_scope(&mut self) {
+        self.cfg.scope = match self.cfg.scope {
+            Scope::Line => Scope::File,
+            Scope::File => Scope::Line,
+        };
+        self.cfg_dirty = true;
+        self.save_config();
+        if crate::expr::parse(&self.query, self.folder.mode).is_ok_and(|e| e.is_some()) {
+            self.start_search();
+        } else {
+            self.message = Some(format!("AND / NOT now apply to the same {}", self.scope_name()));
+        }
+    }
+
+    pub fn scope_name(&self) -> &'static str {
+        match self.cfg.scope {
+            Scope::Line => "line",
+            Scope::File => "file",
+        }
     }
 
     fn toggle_wrap(&mut self) {
@@ -1050,6 +1077,7 @@ impl App {
             },
             item::HIDDEN => on_off(self.folder.hidden),
             item::IGNORED => on_off(self.folder.no_ignore),
+            item::SCOPE => self.scope_name().into(),
             item::LIST => match self.cfg.list_mode {
                 ListMode::File => "per file".into(),
                 ListMode::Match => "per match".into(),
@@ -1086,6 +1114,7 @@ impl App {
                 self.update_folder(|f| f.no_ignore = v);
             }
             item::LIST => self.toggle_list_mode(),
+            item::SCOPE => self.toggle_scope(),
             item::RESET => {
                 if self.folder_saved {
                     self.cfg.folders.remove(&self.folder_key);

@@ -29,6 +29,17 @@ pub enum ListMode {
     Match,
 }
 
+/// What AND / NOT in a search expression apply to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// All terms on the same line.
+    #[default]
+    Line,
+    /// All terms somewhere in the same file.
+    File,
+}
+
 /// Settings remembered per folder (keyed by git root).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -44,6 +55,8 @@ pub struct FolderSettings {
 pub struct Config {
     pub mode: Mode,
     pub case: Case,
+    /// Scope of AND / NOT in search expressions.
+    pub scope: Scope,
     pub types: Vec<String>,
     pub hidden: bool,
     pub no_ignore: bool,
@@ -68,6 +81,7 @@ impl Default for Config {
         Self {
             mode: Mode::Literal,
             case: Case::Smart,
+            scope: Scope::Line,
             types: Vec::new(),
             hidden: false,
             no_ignore: false,

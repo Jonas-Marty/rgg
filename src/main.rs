@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod editor;
+mod expr;
 mod history;
 mod preview;
 mod search;

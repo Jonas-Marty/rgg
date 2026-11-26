@@ -9,6 +9,7 @@ rgg [PATH] [-t TYPE]... [--regex]
 ```
 
 - Type to search (live). ↑↓ select, Enter opens VS Code with the repo folder at the file and line.
+- Expressions: `IFoo AND Bar`, `Error OR Warn`, `IFoo AND NOT Dispose`; Ctrl+F switches AND / NOT between same line and same file.
 - Ctrl+R literal/regex · Ctrl+T file types · Ctrl+O settings · Ctrl+L per-file/per-match list · Alt+W wrap · Alt+P hide/show preview · Alt+←/→ or drag the pane border to resize · Alt+↑/↓ search history · F1 help.
 - Config: `%USERPROFILE%\.rgg\config.toml`. File types, hidden, ignored and mode are remembered per git root.
 

@@ -25,7 +25,21 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 - Limits (configurable): binary files skipped, files over 10 MB skipped, stop at 10,000 matching files ("file limit reached" shown).
 - Fixed limit: at most 5,000 matches kept per file. Files over it show `(5000+)` and the status line reports "N truncated".
 - A match is one occurrence: `foo foo` is two matches. Ctrl+N/P and Enter work per occurrence.
+- Expressions: `a AND b`, `a OR b`, `NOT c`, in literal and regex mode (see below).
 - Invalid regex: a red message in the status line. Any running search is cancelled, so it can't overwrite the error, but the rows already on screen stay.
+
+### Expressions
+- `AND`, `OR` and `NOT` are operators only as upper-case words with a space (or the start / end of the query) on both sides: `ANDROID`, `FOO_AND_BAR` or `xAND` are plain text. In regex mode an escaped space doesn't count, so `foo\ AND\ bar` searches for that text.
+- The text between operators is one term, spaces included: `user name AND id`. Without operators the query is searched exactly as typed, so `foo bar` is still one phrase.
+- Precedence NOT > AND > OR: `Error AND NOT Stack OR Warn` = `(Error AND (NOT Stack)) OR Warn`. `foo NOT bar` reads as `foo AND NOT bar`. A dangling operator while typing (`foo AND `) is ignored.
+- Every OR branch needs a term to search for: `NOT foo` alone is an error.
+- Smart case applies to each term separately: in `Error AND warn`, `Error` is case-sensitive and `warn` is not.
+- Quotes are ordinary text, so `"Error"` finds the string literal. To find ` AND ` itself, use regex mode with `\ AND\ `.
+- Scope, toggled with Ctrl+F and saved globally (default: line):
+  - **line**: AND / NOT apply to one line; the results are the lines that satisfy the expression.
+  - **file**: AND / NOT apply to the whole file; a file counts when it satisfies an OR branch, and its results are the lines containing a term of a satisfied branch. `IFoo AND NOT Dispose` = files using `IFoo` that never mention `Dispose`.
+- Terms are highlighted; negated terms aren't. While an expression is active, the status line shows `[AND per line]` or `[AND per file]`.
+- How it runs: each file is scanned once with a regex of all terms combined, as fast as a normal search; only the lines it finds are checked against the expression.
 
 ## Result list
 - Default: one row per file, e.g. `path (N)`. Configurable (Ctrl+L or settings): one row per occurrence, e.g. `path:line:col  text`, with that occurrence highlighted strongly.
@@ -56,6 +70,7 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 | Ctrl+↑ / Ctrl+↓ | scroll the preview |
 | Enter | open in VS Code at the current match |
 | Ctrl+R | toggle regex |
+| Ctrl+F | AND / NOT per line or per file |
 | Ctrl+T | file type picker |
 | Ctrl+O | settings |
 | Alt+W | toggle preview wrap |
