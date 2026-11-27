@@ -819,6 +819,13 @@ impl App {
                     self.query_changed();
                 }
             }
+            // Alt+D / Alt+B / Alt+F: what some terminals (e.g. VS Code's) send for Ctrl+Delete / Ctrl+← / Ctrl+→.
+            KeyCode::Delete if ctrl || alt => self.delete_word_right(),
+            KeyCode::Char('d' | 'D') if alt => self.delete_word_right(),
+            KeyCode::Left if ctrl => self.cursor = word_part_start(&self.query[..self.cursor]),
+            KeyCode::Right if ctrl => self.cursor += word_part_end(&self.query[self.cursor..]),
+            KeyCode::Char('b' | 'B') if alt => self.cursor = word_part_start(&self.query[..self.cursor]),
+            KeyCode::Char('f' | 'F') if alt => self.cursor += word_part_end(&self.query[self.cursor..]),
             KeyCode::Delete => {
                 if self.cursor < self.query.len() {
                     self.query.remove(self.cursor);
@@ -859,6 +866,14 @@ impl App {
         self.query.insert(self.cursor, c);
         self.cursor += c.len_utf8();
         self.query_changed();
+    }
+
+    fn delete_word_right(&mut self) {
+        let end = self.cursor + word_part_end(&self.query[self.cursor..]);
+        if end > self.cursor {
+            self.query.replace_range(self.cursor..end, "");
+            self.query_changed();
+        }
     }
 
     fn delete_word(&mut self) {
@@ -1289,6 +1304,46 @@ fn word_part_start(s: &str) -> usize {
     chars.get(i).map_or(s.len(), |(b, _)| *b)
 }
 
+/// End (byte length) of the word part that Ctrl+→ / Ctrl+Delete moves over from the start of
+/// `s`, mirroring `word_part_start`: `getUserName` → `get`, `HTTPServer` → `HTTP`.
+fn word_part_end(s: &str) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    if i == chars.len() {
+        return s.len();
+    }
+    let skip = |i: &mut usize, f: &dyn Fn(char) -> bool| {
+        while *i < chars.len() && f(chars[*i]) {
+            *i += 1;
+        }
+    };
+    let c = chars[i];
+    if c.is_numeric() {
+        skip(&mut i, &|c| c.is_numeric());
+    } else if c.is_uppercase() {
+        let start = i;
+        skip(&mut i, &|c| c.is_uppercase());
+        if i < chars.len() && chars[i].is_lowercase() {
+            if i - start > 1 {
+                // `HTTPServer`: the last capital starts the next part.
+                i -= 1;
+            } else {
+                skip(&mut i, &|c| c.is_lowercase());
+            }
+        }
+    } else if c.is_lowercase() {
+        skip(&mut i, &|c| c.is_lowercase());
+    } else if c.is_alphabetic() {
+        skip(&mut i, &|c| c.is_alphabetic() && !c.is_lowercase() && !c.is_uppercase());
+    } else {
+        skip(&mut i, &|c| !c.is_alphanumeric() && !c.is_whitespace());
+    }
+    chars[..i].iter().map(|c| c.len_utf8()).sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1310,6 +1365,38 @@ mod tests {
         assert_eq!(steps("parseHTTP2"), ["parseHTTP", "parse", ""]);
         assert_eq!(steps("foo(bar) "), ["foo(bar", "foo(", "foo", ""]);
         assert_eq!(steps("a.ÄrgerÜber"), ["a.Ärger", "a.", "a", ""]);
+    }
+
+    #[test]
+    fn ctrl_right_moves_over_one_word_part() {
+        let stops = |s: &str| {
+            let mut pos = 0;
+            let mut out = vec![];
+            while pos < s.len() {
+                pos += word_part_end(&s[pos..]);
+                out.push(s[..pos].to_string());
+            }
+            out
+        };
+        assert_eq!(stops("getUserName"), ["get", "getUser", "getUserName"]);
+        assert_eq!(stops("max_file"), ["max", "max_", "max_file"]);
+        assert_eq!(stops("HTTPServer x2"), ["HTTP", "HTTPServer", "HTTPServer x", "HTTPServer x2"]);
+        assert_eq!(stops("ÄrgerÜber"), ["Ärger", "ÄrgerÜber"]);
+    }
+
+    #[test]
+    fn ctrl_keys_move_and_delete_by_word_part() {
+        let mut app = App::new(Config::default(), no_store(), "/r".into(), "/r".into(), vec![], false);
+        app.query = "getUserName".into();
+        app.cursor = app.query.len();
+        let ctrl = |c| key(c, KeyModifiers::CONTROL);
+        app.on_key(ctrl(KeyCode::Left));
+        assert_eq!(app.cursor, "getUser".len());
+        app.on_key(ctrl(KeyCode::Left));
+        app.on_key(ctrl(KeyCode::Delete));
+        assert_eq!((app.query.as_str(), app.cursor), ("getName", 3));
+        app.on_key(ctrl(KeyCode::Right));
+        assert_eq!(app.cursor, "getName".len());
     }
     use crate::search::temp_dir;
     use ratatui::crossterm::event::KeyEvent;

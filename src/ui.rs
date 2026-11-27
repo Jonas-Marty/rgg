@@ -516,6 +516,8 @@ fn draw_help(f: &mut Frame) {
         ("Alt+P", "hide / show preview"),
         ("Alt+← →", "resize list / preview"),
         ("Ctrl+Backspace / Ctrl+W", "delete previous word part"),
+        ("Ctrl+Delete", "delete next word part"),
+        ("Ctrl+← →", "move by word part"),
         ("Ctrl+U", "clear search"),
         ("Alt+↑ ↓", "search history (this repository)"),
         ("Mouse wheel", "scroll list / preview"),
