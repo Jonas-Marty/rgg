@@ -105,7 +105,7 @@ fn main() {
     for name in ["demo.svg", "screenshot.svg"] {
         let _ = std::fs::remove_file(docs.join(name));
     }
-    search::build_types(&[]).unwrap();
+    search::build_types(&[], &search::CustomTypes::new()).unwrap();
     preview::init_blocking();
     let (cfg, store, _) = Config::load_from(None);
     let mut app = App::new(cfg, store, repo.clone(), git_root(&repo), Vec::new(), false);

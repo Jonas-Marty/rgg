@@ -78,13 +78,13 @@ fn main() {
         eprintln!("rgg: not a directory: {}", args.path.display());
         std::process::exit(2);
     }
-    if let Err(e) = search::build_types(&args.types) {
+    let (cfg, store, warning) = Config::load_from(Config::default_path());
+    if let Err(e) = search::build_types(&args.types, &cfg.custom_types) {
         eprintln!("rgg: {e}");
         std::process::exit(2);
     }
     let search_root = clean_canonical(&args.path);
     let root = git_root(&search_root);
-    let (cfg, store, warning) = Config::load_from(Config::default_path());
     preview::warm_up();
 
     let mut app = App::new(cfg, store, search_root, root, args.types, args.regex);

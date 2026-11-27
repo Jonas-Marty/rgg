@@ -7,7 +7,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::Lossy};
 use ignore::types::{Types, TypesBuilder};
 use ignore::{WalkBuilder, WalkState};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -80,19 +80,37 @@ pub fn build_matcher(query: &str, mode: Mode, case: Case) -> Result<RegexMatcher
     b.build(query).map_err(|e| one_line(&e.to_string()))
 }
 
-pub fn build_types(selected: &[String]) -> Result<Types, String> {
+/// Types ripgrep doesn't ship but rgg's users need.
+const EXTRA_TYPES: &[(&str, &[&str])] = &[("xaml", &["*.xaml", "*.axaml"])];
+
+/// User-defined types from the config: name → globs. They add to or replace built-in types.
+pub type CustomTypes = BTreeMap<String, Vec<String>>;
+
+/// ripgrep's built-in types, rgg's extras, then the user's own (which win).
+fn types_builder(custom: &CustomTypes) -> Result<TypesBuilder, String> {
     let mut b = TypesBuilder::new();
     b.add_defaults();
+    let extras = EXTRA_TYPES.iter().map(|(n, g)| (n.to_string(), g.iter().map(|g| g.to_string()).collect::<Vec<_>>()));
+    for (name, globs) in extras.chain(custom.iter().map(|(n, g)| (n.clone(), g.clone()))) {
+        b.clear(&name);
+        for g in &globs {
+            b.add(&name, g).map_err(|e| format!("custom type {name}: {}", one_line(&e.to_string())))?;
+        }
+    }
+    Ok(b)
+}
+
+pub fn build_types(selected: &[String], custom: &CustomTypes) -> Result<Types, String> {
+    let mut b = types_builder(custom)?;
     for t in selected {
         b.select(t);
     }
     b.build().map_err(|e| one_line(&e.to_string()))
 }
 
-/// All built-in ripgrep types as (name, globs joined).
-pub fn type_definitions() -> Vec<(String, String)> {
-    let mut b = TypesBuilder::new();
-    b.add_defaults();
+/// All known types as (name, globs joined).
+pub fn type_definitions(custom: &CustomTypes) -> Vec<(String, String)> {
+    let Ok(b) = types_builder(custom) else { return Vec::new() };
     b.definitions()
         .into_iter()
         .map(|d| (d.name().to_string(), d.globs().join(", ")))
@@ -364,7 +382,7 @@ mod tests {
             params,
             matcher,
             filter.map(Arc::new),
-            build_types(types).unwrap(),
+            build_types(types, &CustomTypes::new()).unwrap(),
             1,
             tx,
             Arc::new(AtomicBool::new(false)),
@@ -492,7 +510,40 @@ x.Dispose();
     fn bad_regex_and_type_report_errors() {
         assert!(build_matcher("foo(", Mode::Regex, Case::Smart).is_err());
         assert!(build_matcher("foo(", Mode::Literal, Case::Smart).is_ok());
-        assert!(build_types(&["nope-not-a-type".into()]).is_err());
-        assert!(type_definitions().iter().any(|(n, _)| n == "cs"));
+        let none = CustomTypes::new();
+        assert!(build_types(&["nope-not-a-type".into()], &none).is_err());
+        assert!(type_definitions(&none).iter().any(|(n, _)| n == "cs"));
+        let bad = CustomTypes::from([("x".to_string(), vec!["a{".to_string()])]);
+        assert!(build_types(&["x".into()], &bad).is_err(), "invalid custom glob");
+    }
+
+    #[test]
+    fn xaml_and_custom_types() {
+        let dir = temp_dir("types");
+        for f in ["View.xaml", "App.axaml", "a.cs", "b.razor", "c.xml"] {
+            std::fs::write(dir.join(f), "Grid\n").unwrap();
+        }
+        let names = |types: &[&str], custom: &CustomTypes| {
+            let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+            let (tx, rx) = mpsc::channel();
+            let params = Params { root: dir.clone(), hidden: false, no_ignore: false, max_filesize: 1 << 20, max_files: 100 };
+            let m = build_matcher("Grid", Mode::Literal, Case::Smart).unwrap();
+            spawn(params, m, None, build_types(&types, custom).unwrap(), 1, tx, Arc::new(AtomicBool::new(false)));
+            let mut v: Vec<String> = rx
+                .iter()
+                .map_while(|m| match m {
+                    Msg::File { file, .. } => Some(file.rel.to_string_lossy().into_owned()),
+                    Msg::Done { .. } => None,
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        let none = CustomTypes::new();
+        assert_eq!(names(&["xaml"], &none), ["App.axaml", "View.xaml"]);
+        let custom = CustomTypes::from([("razor".to_string(), vec!["*.razor".to_string()]), ("xaml".to_string(), vec!["*.xaml".to_string()])]);
+        assert_eq!(names(&["razor", "xaml"], &custom), ["View.xaml", "b.razor"], "custom types add and override");
+        assert!(type_definitions(&custom).iter().any(|(n, g)| n == "razor" && g == "*.razor"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

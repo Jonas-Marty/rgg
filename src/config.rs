@@ -73,6 +73,8 @@ pub struct Config {
     pub history_size: usize,
     pub theme: String,
     pub editor_command: String,
+    /// Own file types, name → globs, e.g. `razor = ["*.razor"]`. Add to or replace built-in types.
+    pub custom_types: BTreeMap<String, Vec<String>>,
     pub folders: BTreeMap<String, FolderSettings>,
 }
 
@@ -96,6 +98,7 @@ impl Default for Config {
             history_size: 100,
             theme: "base16-ocean.dark".into(),
             editor_command: "code {root} -g {file}:{line}:{col}".into(),
+            custom_types: BTreeMap::new(),
             folders: BTreeMap::new(),
         }
     }

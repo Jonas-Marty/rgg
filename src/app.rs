@@ -462,7 +462,7 @@ impl App {
             return;
         }
         let built = crate::expr::compile(&self.query, self.folder.mode, self.cfg.case, self.cfg.scope)
-            .and_then(|m| search::build_types(&self.folder.types).map(|t| (m, t)));
+            .and_then(|m| search::build_types(&self.folder.types, &self.cfg.custom_types).map(|t| (m, t)));
         let ((matcher, filter), types) = match built {
             Ok(v) => v,
             Err(e) => {
@@ -1029,7 +1029,7 @@ impl App {
 
     fn open_types(&mut self) {
         self.popup = Popup::Types(TypePicker {
-            all: search::type_definitions(),
+            all: search::type_definitions(&self.cfg.custom_types),
             filter: String::new(),
             selected: self.folder.types.iter().cloned().collect(),
             cursor: 0,

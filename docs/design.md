@@ -21,7 +21,7 @@ A small, fast TUI for finding text in files and jumping straight to VS Code. Sea
 - Modes: literal (default) and regex.
 - Case: smart (default), sensitive, or insensitive.
 - Toggles: include hidden files and include ignored files (both off by default, like rg).
-- File types: ripgrep's built-in type list. You can pick several, e.g. `cs`, `xml`. No custom types in v1.
+- File types: ripgrep's built-in type list plus `xaml` (`*.xaml`, `*.axaml`), which ripgrep lacks. You can pick several, e.g. `cs`, `xaml`. Own types go in the config under `[custom_types]` (name → globs) and add to or replace built-in ones; an invalid glob shows as an error in the status line.
 - Limits (configurable): binary files skipped, files over 10 MB skipped, stop at 10,000 matching files ("file limit reached" shown).
 - Fixed limit: at most 5,000 matches kept per file. Files over it show `(5000+)` and the status line reports "N truncated".
 - A match is one occurrence: `foo foo` is two matches. Ctrl+N/P and Enter work per occurrence.
@@ -130,6 +130,9 @@ resize_step = 2             # columns per Alt+←/→
 history_size = 100          # searches kept per repository, 0 = off
 theme = "base16-ocean.dark"
 editor_command = "code {root} -g {file}:{line}:{col}"
+
+[custom_types]               # own file types, e.g. for -t / Ctrl+T
+razor = ["*.razor", "*.cshtml"]
 
 [folders.'D:\Foo']
 types = ["cs"]
