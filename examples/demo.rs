@@ -1,12 +1,13 @@
-//! Renders the README demo: drives the real app with scripted keys on an offscreen terminal
-//! and writes `docs/demo.svg` (animated) and `docs/screenshot.svg` (still).
+//! Renders the README demos: drives the real app with scripted keys on an offscreen terminal
+//! and writes `docs/demo.svg` (animated), `docs/demo-expr.svg` (animated, search expressions)
+//! and `docs/screenshot.svg` (still).
 //!
 //! ```
 //! cargo run --release --example demo
 //! ```
 //!
 //! It searches this repository and uses an in-memory config, so nothing on disk changes
-//! except the two SVGs.
+//! except the SVGs.
 
 #![allow(dead_code)]
 
@@ -65,6 +66,13 @@ fn ctrl(c: char) -> Step {
 fn alt(code: KeyCode) -> Step {
     Step::Key(KeyEvent::new(code, KeyModifiers::ALT))
 }
+fn ctrl_key(code: KeyCode) -> Step {
+    Step::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+}
+/// The same key `n` times, `ms` apart.
+fn repeat(step: fn() -> Step, n: usize, ms: u64) -> Vec<Step> {
+    (0..n).flat_map(|_| [step(), Step::Hold(ms)]).collect()
+}
 
 /// How a key press is shown in the overlay, e.g. "Ctrl+N" or "Alt+→".
 fn key_label(k: &KeyEvent) -> String {
@@ -78,6 +86,7 @@ fn key_label(k: &KeyEvent) -> String {
         KeyCode::Right => "→".into(),
         KeyCode::Enter => "Enter".into(),
         KeyCode::Esc => "Esc".into(),
+        KeyCode::Backspace => "Backspace".into(),
         other => format!("{other:?}"),
     };
     let mut out = String::new();
@@ -102,17 +111,48 @@ fn main() {
     let repo = clean_canonical(Path::new(env!("CARGO_MANIFEST_DIR")));
     let docs = repo.join("docs");
     // Earlier output would show up in the search results.
-    for name in ["demo.svg", "screenshot.svg"] {
+    for name in ["demo.svg", "demo-expr.svg", "screenshot.svg"] {
         let _ = std::fs::remove_file(docs.join(name));
     }
     search::build_types(&[], &search::CustomTypes::new()).unwrap();
     preview::init_blocking();
-    let (cfg, store, _) = Config::load_from(None);
-    let mut app = App::new(cfg, store, repo.clone(), git_root(&repo), Vec::new(), false);
-    let mut term = Terminal::new(TestBackend::new(COLS, ROWS)).unwrap();
+    let new_app = |root: &Path, types: Vec<String>| {
+        let (cfg, store, _) = Config::load_from(None);
+        App::new(cfg, store, root.to_path_buf(), git_root(root), types, false)
+    };
 
+    // Main demo. Two searches from an "earlier session" for the history part.
+    let mut app = new_app(&repo, Vec::new());
+    for q in ["word_part_start", "record_history"] {
+        seed_history(&mut app, q);
+    }
+    let (frames, still) = record(&mut app, main_script(), Some(10));
+    let anim = render(&frames, true);
+    std::fs::write(docs.join("demo.svg"), &anim).unwrap();
+    let still = render(&[still.unwrap()], false);
+    std::fs::write(docs.join("screenshot.svg"), &still).unwrap();
+    dump_frames("main", &frames);
+
+    // Expressions, on the Rust sources only (the script itself would match in examples/).
+    let mut app = new_app(&repo.join("src"), vec!["rust".into()]);
+    let (expr_frames, _) = record(&mut app, expr_script(), None);
+    let expr_anim = render(&expr_frames, true);
+    std::fs::write(docs.join("demo-expr.svg"), &expr_anim).unwrap();
+    dump_frames("expr", &expr_frames);
+
+    println!(
+        "demo.svg {} frames {} KB, demo-expr.svg {} frames {} KB, screenshot.svg {} KB",
+        frames.len(),
+        anim.len() / 1024,
+        expr_frames.len(),
+        expr_anim.len() / 1024,
+        still.len() / 1024
+    );
+}
+
+fn main_script() -> Vec<Step> {
     use KeyCode::*;
-    let script = vec![
+    let mut s = vec![
         Step::Hold(900),
         Step::Type("preview"),
         Step::Hold(1400),
@@ -133,7 +173,7 @@ fn main() {
         Step::Hold(700),
         key(Enter),
         Step::Hold(1200),
-        // One row per match.
+        // One row per match; jump to the last and the first one.
         ctrl('l'),
         Step::Hold(1000),
         key(Down),
@@ -141,7 +181,11 @@ fn main() {
         key(Down),
         Step::Hold(350),
         key(Down),
-        Step::Hold(1000),
+        Step::Hold(800),
+        ctrl_key(End),
+        Step::Hold(900),
+        ctrl_key(Home),
+        Step::Hold(900),
         // Regex mode.
         ctrl('u'),
         ctrl('r'),
@@ -151,29 +195,96 @@ fn main() {
         key(Down),
         Step::Hold(500),
         key(Down),
-        Step::Hold(1500),
-        // Resize the panes, hide and show the preview.
-        alt(Right),
+        Step::Hold(1300),
+        // Editing by word part, back in literal mode.
+        ctrl('u'),
+        ctrl('r'),
         Step::Hold(400),
-        alt(Right),
-        Step::Hold(400),
-        alt(Right),
+        Step::Type("draw_scrollbar"),
         Step::Hold(1200),
-        alt(Char('p')),
-        Step::Hold(1500),
-        alt(Char('p')),
+        ctrl_key(Backspace),
         Step::Hold(900),
-        alt(Left),
-        Step::Hold(400),
-        alt(Left),
-        Step::Hold(400),
-        alt(Left),
-        Step::Hold(2500),
+        Step::Type("status"),
+        Step::Hold(1200),
+        key(Home),
+        Step::Hold(700),
+        key(End),
+        Step::Hold(700),
+        ctrl_key(Left),
+        Step::Hold(600),
+        ctrl_key(Left),
+        Step::Hold(900),
+        // Earlier searches.
+        alt(Up),
+        Step::Hold(1300),
+        alt(Up),
+        Step::Hold(1300),
+        alt(Down),
+        Step::Hold(700),
+        alt(Down),
+        Step::Hold(1200),
     ];
+    // Resize the panes, hide and show the preview.
+    s.extend(repeat(|| alt(KeyCode::Right), 8, 120));
+    s.extend([Step::Hold(1000), alt(Char('p')), Step::Hold(1500), alt(Char('p')), Step::Hold(900)]);
+    s.extend(repeat(|| alt(KeyCode::Left), 8, 120));
+    s.push(Step::Hold(2500));
+    s
+}
 
+fn expr_script() -> Vec<Step> {
+    use KeyCode::*;
+    vec![
+        Step::Hold(900),
+        // AND on the same line.
+        Step::Type("RegexMatcher AND build_matcher"),
+        Step::Hold(1800),
+        key(Down),
+        Step::Hold(900),
+        // The same query across whole files.
+        ctrl('f'),
+        Step::Hold(1800),
+        key(Down),
+        Step::Hold(600),
+        key(Down),
+        Step::Hold(1200),
+        // Files that use RegexMatcher but never mention Scope.
+        ctrl('u'),
+        Step::Type("RegexMatcher AND NOT Scope"),
+        Step::Hold(2200),
+        // OR, back on lines.
+        ctrl('f'),
+        ctrl('u'),
+        Step::Type("word_part OR recall_history"),
+        Step::Hold(1500),
+        key(Down),
+        Step::Hold(500),
+        key(Down),
+        Step::Hold(2500),
+    ]
+}
+
+/// Runs a search and stores it in the history, as if from an earlier session.
+fn seed_history(app: &mut App, q: &str) {
+    app.query = q.into();
+    app.start_search();
+    let start = Instant::now();
+    while app.is_busy() && start.elapsed() < Duration::from_secs(5) {
+        app.tick();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    app.record_history();
+    app.query.clear();
+    app.start_search();
+}
+
+/// Plays `script` and captures the frames; with `still_at`, also the frame after that step.
+fn record(app: &mut App, script: Vec<Step>, still_at: Option<usize>) -> (Vec<Frame>, Option<Frame>) {
+    use KeyCode::*;
+    let mut term = Terminal::new(TestBackend::new(COLS, ROWS)).unwrap();
     let mut frames: Vec<Frame> = Vec::new();
     let mut still: Option<Frame> = None;
-    capture(&mut term, &mut app, &mut frames, None, 0);
+    capture(&mut term, app, &mut frames, None, 0);
     // The last key pressed and how often in a row, while its overlay is still showing.
     let mut repeat: Option<(String, u32)> = None;
     let mut since_key = 0;
@@ -193,43 +304,32 @@ fn main() {
                 let shown = if count > 1 { format!("{label} ×{count}") } else { label.clone() };
                 repeat = Some((label, count));
                 since_key = 0;
-                capture(&mut term, &mut app, &mut frames, Some(shown), 120);
+                capture(&mut term, app, &mut frames, Some(shown), 120);
             }
             Step::Type(s) => {
                 repeat = None;
                 for (n, c) in s.char_indices() {
                     app.on_key(KeyEvent::new(Char(c), KeyModifiers::NONE));
                     let typed = s[..n + c.len_utf8()].to_string();
-                    capture(&mut term, &mut app, &mut frames, Some(typed), 110);
+                    capture(&mut term, app, &mut frames, Some(typed), 110);
                 }
             }
         }
-        // The still: Rust-only file list, second match of the selected file.
-        if i == 10 {
+        if still_at == Some(i) {
             let f = frames.last().unwrap();
             still = Some(Frame { buf: f.buf.clone(), cursor: f.cursor, keys: None, ms: 0 });
         }
     }
-    let frames = fade_keys(frames);
+    (fade_keys(frames), still)
+}
 
-    // For checking single frames: DEMO_FRAMES=<dir> writes each frame as its own SVG.
-    if let Some(dir) = std::env::var_os("DEMO_FRAMES") {
-        for (i, f) in frames.iter().enumerate() {
-            let one = Frame { buf: f.buf.clone(), cursor: f.cursor, keys: f.keys.clone(), ms: 0 };
-            std::fs::write(Path::new(&dir).join(format!("{i:02}.svg")), render(&[one], false)).unwrap();
-        }
+/// For checking single frames: DEMO_FRAMES=<dir> writes each frame as its own SVG.
+fn dump_frames(name: &str, frames: &[Frame]) {
+    let Some(dir) = std::env::var_os("DEMO_FRAMES") else { return };
+    for (i, f) in frames.iter().enumerate() {
+        let one = Frame { buf: f.buf.clone(), cursor: f.cursor, keys: f.keys.clone(), ms: 0 };
+        std::fs::write(Path::new(&dir).join(format!("{name}-{i:03}.svg")), render(&[one], false)).unwrap();
     }
-
-    let anim = render(&frames, true);
-    std::fs::write(docs.join("demo.svg"), &anim).unwrap();
-    let still = render(&[still.unwrap()], false);
-    std::fs::write(docs.join("screenshot.svg"), &still).unwrap();
-    println!(
-        "{} frames, demo.svg {} KB, screenshot.svg {} KB",
-        frames.len(),
-        anim.len() / 1024,
-        still.len() / 1024
-    );
 }
 
 /// Splits frames that stay up long so the keystroke overlay disappears after `KEY_SHOWN_MS`.

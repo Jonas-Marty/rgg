@@ -78,7 +78,12 @@ fn draw_search(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let counts = format!(" {} files · {} matches · ", app.files.len(), app.total_matches);
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let counts = format!(
+        " {} · {} · ",
+        count(app.files.len(), "file", "files"),
+        count(app.total_matches, "match", "matches")
+    );
     let line1 = if let Some(msg) = &app.message {
         Line::from(Span::styled(format!(" {msg}"), Style::default().fg(Color::Yellow)))
     } else {
@@ -115,6 +120,11 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
     let mut tags = vec![Span::raw(" ")];
     tags.push(tag(if app.folder.mode == Mode::Regex { "regex" } else { "literal" }.into(), true));
+    // Right after the mode: it describes the query, and the line may be cut on narrow panes.
+    if app.expression {
+        tags.push(Span::raw(" "));
+        tags.push(tag(format!("AND per {}", app.scope_name()), false));
+    }
     tags.push(Span::raw(" "));
     tags.push(tag(
         match app.cfg.case {
@@ -130,10 +140,6 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         if app.folder.types.is_empty() { "all types".into() } else { app.folder.types.join(", ") },
         true,
     ));
-    if app.expression {
-        tags.push(Span::raw(" "));
-        tags.push(tag(format!("AND per {}", app.scope_name()), false));
-    }
     if app.folder.hidden {
         tags.push(Span::raw(" "));
         tags.push(tag("hidden".into(), true));
